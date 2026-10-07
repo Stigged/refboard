@@ -10,6 +10,7 @@ from PySide6.QtCore import QEvent, QPoint, QPointF, QRect, QRectF, Qt, Signal
 from PySide6.QtGui import QColor, QCursor, QImage, QKeySequence, QPainter, QPalette, QPen, QPixmap
 from PySide6.QtWidgets import QApplication, QFrame, QGraphicsScene, QGraphicsView
 
+from context_menu import show_context_menu
 from image_item import ACCENT_COLOR, HANDLE_GRAB, MIN_CROP_SIZE, ROTATE_GRAB, ImageItem
 
 # Look and feel. Tweak these freely.
@@ -561,9 +562,9 @@ class Canvas(QGraphicsView):
             return
 
         if event.button() == Qt.RightButton:
-            # Nothing uses the right button (yet). Don't pass it on: Qt's
-            # scene treats any click nobody wants as "clicked on empty
-            # space" and clears the selection, even mid-drag.
+            # The menu itself opens in contextMenuEvent. Don't pass the click
+            # on: Qt's scene treats any click nobody wants as "clicked on
+            # empty space" and clears the selection, even mid-drag.
             return
 
         if event.button() == Qt.LeftButton and event.modifiers() & Qt.AltModifier:
@@ -701,6 +702,18 @@ class Canvas(QGraphicsView):
             self._before_left_drag = None
             return
         super().mouseReleaseEvent(event)
+
+    def contextMenuEvent(self, event):
+        """Right-click: Qt sends this separately, right after the mouse press."""
+        if QApplication.mouseButtons() & Qt.LeftButton:
+            return  # in the middle of a left-drag: don't interrupt it
+        # Right-clicking an image that isn't selected selects just that one,
+        # like in a file manager. On a selected image, the selection stays.
+        item = self.itemAt(event.pos())
+        if isinstance(item, ImageItem) and not item.isSelected():
+            self.scene().clearSelection()
+            item.setSelected(True)
+        show_context_menu(self, event.globalPos(), self.mapToScene(event.pos()))
 
     def mouseDoubleClickEvent(self, event):
         # Double-click an image to bring it to the front.
