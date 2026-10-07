@@ -4,14 +4,9 @@ import math
 
 from PySide6.QtCore import QPoint, QPointF, Qt
 from PySide6.QtGui import QColor, QCursor, QImage, QKeySequence, QPainter, QPen, QPixmap
-from PySide6.QtWidgets import (
-    QApplication,
-    QFrame,
-    QGraphicsItem,
-    QGraphicsPixmapItem,
-    QGraphicsScene,
-    QGraphicsView,
-)
+from PySide6.QtWidgets import QApplication, QFrame, QGraphicsScene, QGraphicsView
+
+from image_item import HANDLE_GRAB, ROTATE_GRAB, ImageItem
 
 # Look and feel. Tweak these freely.
 # Colors borrowed from Apple's dark-mode system grays.
@@ -22,6 +17,9 @@ ZOOM_STEP = 1.15  # how much one scroll-wheel notch zooms
 MIN_ZOOM = 0.02
 MAX_ZOOM = 50
 STACK_OFFSET = 30  # when adding several images at once, shift each one by this much
+IMAGE_SCALE_STEP = 1.1  # how much one Ctrl+scroll notch scales selected images
+MIN_IMAGE_SCALE = 0.01
+ROTATE_STEP = 15  # degrees per Alt+scroll notch, and the Shift snapping angle
 
 # Qt needs the canvas to have *some* size. A million units in every
 # direction is big enough that you'll never reach the edge.
@@ -55,7 +53,12 @@ class Canvas(QGraphicsView):
         # Allow files and images to be dropped onto the canvas.
         self.setAcceptDrops(True)
 
+        # Report mouse movement even with no button held, so the cursor can
+        # change when hovering over a scale/rotate handle.
+        self.viewport().setMouseTracking(True)
+
         self._pan_last_pos = None  # set while the middle mouse button is held
+        self._handle_drag = None  # set while dragging a scale/rotate handle
         self.centerOn(0, 0)
 
     def zoom_level(self):
@@ -66,10 +69,7 @@ class Canvas(QGraphicsView):
 
     def add_image(self, image, center):
         """Put a QImage on the canvas, centred on `center` (in canvas units)."""
-        item = QGraphicsPixmapItem(QPixmap.fromImage(image))
-        item.setTransformationMode(Qt.SmoothTransformation)
-        # Let the user click to select it and drag it around.
-        item.setFlags(QGraphicsItem.ItemIsMovable | QGraphicsItem.ItemIsSelectable)
+        item = ImageItem(image)
         item.setPos(center - QPointF(image.width() / 2, image.height() / 2))
         self.scene().addItem(item)
 
@@ -133,29 +133,93 @@ class Canvas(QGraphicsView):
             return
         super().keyPressEvent(event)
 
-    # ---- Zooming -----------------------------------------------------------
+    # ---- Mouse wheel: zoom the board, or scale/rotate selected images ------
 
     def wheelEvent(self, event):
         # One wheel notch is 120 "units". Touchpads send smaller amounts,
         # which gives smooth zooming for free.
-        notches = event.angleDelta().y() / 120
+        # Qt turns Alt+scroll into sideways scrolling, so read whichever axis moved.
+        notches = (event.angleDelta().y() or event.angleDelta().x()) / 120
+        selected = self.scene().selectedItems()
+        ctrl = bool(event.modifiers() & Qt.ControlModifier)
+        alt = bool(event.modifiers() & Qt.AltModifier)
+
+        if selected and ctrl:
+            for item in selected:
+                item.setScale(max(MIN_IMAGE_SCALE, item.scale() * IMAGE_SCALE_STEP**notches))
+            return
+        if selected and alt:
+            for item in selected:
+                item.setRotation((item.rotation() + ROTATE_STEP * notches) % 360)
+            return
+
         target = self.zoom_level() * ZOOM_STEP**notches
         target = max(MIN_ZOOM, min(MAX_ZOOM, target))
         factor = target / self.zoom_level()
         self.scale(factor, factor)
 
-    # ---- Panning (hold middle mouse button and drag) -----------------------
+    # ---- Handles: find which one (if any) is under the mouse ---------------
+
+    def handle_at(self, pos):
+        """Is `pos` (window pixels) on a corner handle of a selected image?
+
+        Returns (item, "scale") or (item, "rotate"), or None if not.
+        On the corner = scale. Just outside the corner = rotate.
+        """
+        scene_pos = self.mapToScene(pos)
+        for item in self.scene().selectedItems():
+            for corner in item.corners():
+                corner_on_screen = self.mapFromScene(item.mapToScene(corner))
+                distance = math.dist((pos.x(), pos.y()), (corner_on_screen.x(), corner_on_screen.y()))
+                if distance <= HANDLE_GRAB:
+                    return item, "scale"
+                outside = not item.contains(item.mapFromScene(scene_pos))
+                if distance <= ROTATE_GRAB and outside:
+                    return item, "rotate"
+        return None
+
+    def angle_from_center(self, item, scene_pos):
+        """Angle (degrees) of the line from the image's centre to `scene_pos`."""
+        d = scene_pos - item.center_in_scene()
+        return math.degrees(math.atan2(d.y(), d.x()))
+
+    def distance_from_center(self, item, scene_pos):
+        d = scene_pos - item.center_in_scene()
+        return math.hypot(d.x(), d.y())
+
+    # ---- Mouse buttons: middle = pan, left = Qt's select/move + our handles
 
     def mousePressEvent(self, event):
+        pos = event.position().toPoint()
+
         if event.button() == Qt.MiddleButton:
-            self._pan_last_pos = event.position().toPoint()
-            self.setCursor(Qt.ClosedHandCursor)
+            self._pan_last_pos = pos
+            self.viewport().setCursor(Qt.ClosedHandCursor)
             return
+
+        if event.button() == Qt.LeftButton:
+            hit = self.handle_at(pos)
+            if hit is not None:
+                item, mode = hit
+                scene_pos = self.mapToScene(pos)
+                # Remember how things were at the start of the drag; every
+                # mouse move then compares against this starting point.
+                self._handle_drag = {
+                    "item": item,
+                    "mode": mode,
+                    "start_scale": item.scale(),
+                    "start_distance": max(1e-6, self.distance_from_center(item, scene_pos)),
+                    "start_rotation": item.rotation(),
+                    "start_angle": self.angle_from_center(item, scene_pos),
+                }
+                return
+
         super().mousePressEvent(event)
 
     def mouseMoveEvent(self, event):
+        pos = event.position().toPoint()
+
         if self._pan_last_pos is not None:
-            pos = event.position().toPoint()
             delta: QPoint = pos - self._pan_last_pos
             self._pan_last_pos = pos
             # Panning = moving the hidden scrollbars the opposite way.
@@ -164,12 +228,43 @@ class Canvas(QGraphicsView):
             h.setValue(h.value() - delta.x())
             v.setValue(v.value() - delta.y())
             return
+
+        if self._handle_drag is not None:
+            drag = self._handle_drag
+            item = drag["item"]
+            scene_pos = self.mapToScene(pos)
+            if drag["mode"] == "scale":
+                # Twice as far from the centre as when you grabbed it = twice as big.
+                ratio = self.distance_from_center(item, scene_pos) / drag["start_distance"]
+                item.setScale(max(MIN_IMAGE_SCALE, drag["start_scale"] * ratio))
+            else:
+                # Turn by however much the mouse has swung around the centre.
+                turned = self.angle_from_center(item, scene_pos) - drag["start_angle"]
+                angle = drag["start_rotation"] + turned
+                if event.modifiers() & Qt.ShiftModifier:
+                    angle = round(angle / ROTATE_STEP) * ROTATE_STEP
+                item.setRotation(angle % 360)
+            return
+
+        # No button held: show a hint cursor when hovering over a handle.
+        if event.buttons() == Qt.NoButton:
+            hit = self.handle_at(pos)
+            if hit is None:
+                self.viewport().unsetCursor()
+            elif hit[1] == "scale":
+                self.viewport().setCursor(Qt.SizeAllCursor)
+            else:
+                self.viewport().setCursor(Qt.CrossCursor)
+
         super().mouseMoveEvent(event)
 
     def mouseReleaseEvent(self, event):
         if event.button() == Qt.MiddleButton and self._pan_last_pos is not None:
             self._pan_last_pos = None
-            self.unsetCursor()
+            self.viewport().unsetCursor()
+            return
+        if event.button() == Qt.LeftButton and self._handle_drag is not None:
+            self._handle_drag = None
             return
         super().mouseReleaseEvent(event)
 
