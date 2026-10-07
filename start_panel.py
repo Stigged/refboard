@@ -18,6 +18,7 @@ LABEL_COLOR = QColor("#8E8E93")
 ACCENT_COLOR = QColor("#0A84FF")  # Apple "systemBlue": the main button
 ACCENT_HOVER_COLOR = QColor("#409CFF")
 BUTTON_HOVER_COLOR = QColor("#3A3A3C")
+FOCUS_RING_COLOR = QColor("#0A84FF")
 
 # Sizes, in pixels. The panel has one fixed size; the window's minimum size
 # is built around it, so it always fits.
@@ -100,8 +101,13 @@ class StartPanel(QWidget):
             ("New board", QKeySequence(QKeySequence.New), self.new_board_requested, True),
             ("Open board…", QKeySequence(QKeySequence.Open), self.open_requested, False),
         ]
-        self.hovered = None  # number of the button under the mouse, or None
+        # The highlighted button (by mouse hover or arrow keys), or None.
+        self.active = None
+        # True while using the arrow keys: then we also draw a focus ring.
+        self.keyboard_navigating = False
         self.setMouseTracking(True)  # get mouse moves even without a button held
+        # Accept keyboard focus, so arrow keys come to us instead of the canvas.
+        self.setFocusPolicy(Qt.StrongFocus)
 
         self.setFixedSize(PANEL_WIDTH, PANEL_HEIGHT)
         # Watch the parent's events, so we notice when it's resized.
@@ -130,21 +136,48 @@ class StartPanel(QWidget):
                 return number
         return None
 
+    def showEvent(self, event):
+        self.setFocus()  # grab the keyboard as soon as we appear
+
     def mouseMoveEvent(self, event):
         hovered = self.button_at(event.position())
-        if hovered != self.hovered:
-            self.hovered = hovered
+        if hovered != self.active or self.keyboard_navigating:
+            self.active = hovered
+            self.keyboard_navigating = False  # the mouse took over
             self.setCursor(Qt.PointingHandCursor if hovered is not None else Qt.ArrowCursor)
-            self.update()  # ask Qt to repaint, so the hover colour shows
+            self.update()  # ask Qt to repaint, so the highlight shows
 
     def leaveEvent(self, event):
-        self.hovered = None
-        self.update()
+        if not self.keyboard_navigating:
+            self.active = None
+            self.update()
+
+    def keyPressEvent(self, event):
+        count = len(self.buttons)
+        if event.key() in (Qt.Key_Down, Qt.Key_Up):
+            step = 1 if event.key() == Qt.Key_Down else -1
+            if self.active is None:
+                # First press: start at the top (Down) or the bottom (Up).
+                self.active = 0 if step == 1 else count - 1
+            else:
+                # % count wraps around: past the last button goes back to the first.
+                self.active = (self.active + step) % count
+            self.keyboard_navigating = True
+            self.update()
+            return  # handled; don't let the canvas pan
+        if event.key() in (Qt.Key_Return, Qt.Key_Enter, Qt.Key_Space) and self.active is not None:
+            self.buttons[self.active][2].emit()
+            return
+        if event.key() in (Qt.Key_Left, Qt.Key_Right):
+            return  # swallow these too, for now (later: move into the tiles)
+        # Anything else (like Ctrl+V) goes on to the canvas as usual.
+        super().keyPressEvent(event)
 
     def mousePressEvent(self, event):
         # Always accept, so clicks on the panel never fall through to the canvas.
         event.accept()
         number = self.button_at(event.position())
+        self.setFocus()
         if event.button() == Qt.LeftButton and number is not None:
             signal = self.buttons[number][2]
             signal.emit()
@@ -190,7 +223,7 @@ class StartPanel(QWidget):
         painter.setFont(small_font)
         for number, (text, keys, _signal, is_main) in enumerate(self.buttons):
             rect = self.button_rect(number)
-            hovered = number == self.hovered
+            hovered = number == self.active
 
             # Background: the main button is always blue; the others only
             # get a background while hovered.
@@ -202,6 +235,13 @@ class StartPanel(QWidget):
                 painter.setBrush(Qt.NoBrush)
             painter.setPen(Qt.NoPen)
             painter.drawPath(squircle_path(rect, BUTTON_RADIUS))
+
+            # Keyboard focus ring: an outline drawn just outside the button.
+            if hovered and self.keyboard_navigating:
+                ring = QPen(FOCUS_RING_COLOR, 2)
+                painter.setPen(ring)
+                painter.setBrush(Qt.NoBrush)
+                painter.drawPath(squircle_path(rect.adjusted(-3, -3, 3, 3), BUTTON_RADIUS + 3))
 
             # Text on the left, the shortcut (e.g. "Ctrl+N") faintly on the right.
             inner = rect.adjusted(12, 0, -12, 0)

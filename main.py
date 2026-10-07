@@ -52,6 +52,7 @@ class MainWindow(QMainWindow):
         small reference window in a screen corner)."""
         self.start_panel.hide()
         self.setMinimumSize(SMALLEST_WINDOW_WIDTH, SMALLEST_WINDOW_HEIGHT)
+        self.canvas.setFocus()  # give the keyboard back to the canvas
 
     def add_shortcut(self, keys, method):
         """Run `method` when `keys` are pressed anywhere in the window."""
