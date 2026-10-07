@@ -36,7 +36,10 @@ class MainWindow(QMainWindow):
         # The recent-boards panel floats over the canvas until you start working.
         self.start_panel = StartPanel(self.canvas)
         self.canvas.changed.connect(self.close_start_panel)
+        self.start_panel.new_board_requested.connect(self.new_board)
+        self.start_panel.open_requested.connect(self.open)
 
+        self.add_shortcut(QKeySequence.New, self.new_board)  # Ctrl+N
         self.add_shortcut(QKeySequence.Save, self.save)  # Ctrl+S
         self.add_shortcut(QKeySequence.SaveAs, self.save_as)  # Ctrl+Shift+S
         self.add_shortcut(QKeySequence.Open, self.open)  # Ctrl+O
@@ -89,6 +92,15 @@ class MainWindow(QMainWindow):
             event.ignore()
 
     # ---- Open and save -----------------------------------------------------
+
+    def new_board(self):
+        if not self.ok_to_lose_changes():
+            return
+        self.canvas.clear_board()
+        self.path = None
+        self.setWindowModified(False)
+        self.update_title()
+        self.close_start_panel()
 
     def open(self):
         if not self.ok_to_lose_changes():

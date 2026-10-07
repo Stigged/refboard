@@ -1,12 +1,12 @@
-"""The start panel: a small floating window with your recent boards.
+"""The start panel: a floating card with a sidebar (new / open) and your recent boards.
 
-For now it only shows four placeholder tiles; opening boards comes later.
+The recent-board tiles are still placeholders; filling them comes later.
 """
 
 import math
 
-from PySide6.QtCore import QEvent, QPointF, QRectF, Qt
-from PySide6.QtGui import QColor, QFont, QPainter, QPainterPath, QPen
+from PySide6.QtCore import QEvent, QPointF, QRectF, Qt, Signal
+from PySide6.QtGui import QColor, QFont, QKeySequence, QPainter, QPainterPath, QPen
 from PySide6.QtWidgets import QGraphicsDropShadowEffect, QWidget
 
 # Colors: Apple dark-mode "elevated" grays.
@@ -15,6 +15,9 @@ BORDER_COLOR = QColor("#3A3A3C")
 TILE_COLOR = QColor("#3A3A3C")
 TITLE_COLOR = QColor("#E5E5EA")
 LABEL_COLOR = QColor("#8E8E93")
+ACCENT_COLOR = QColor("#0A84FF")  # Apple "systemBlue": the main button
+ACCENT_HOVER_COLOR = QColor("#409CFF")
+BUTTON_HOVER_COLOR = QColor("#3A3A3C")
 
 # Sizes, in pixels. The panel has one fixed size; the window's minimum size
 # is built around it, so it always fits.
@@ -30,6 +33,10 @@ LABEL_HEIGHT = 30  # room for the board name under each tile
 GAP = 16  # space between tiles
 PANEL_RADIUS = 28
 TILE_RADIUS = 14
+SIDEBAR_WIDTH = 220  # the left column with the buttons
+BUTTON_HEIGHT = 36
+BUTTON_GAP = 8
+BUTTON_RADIUS = 10
 
 # Corner shape. 2 would be an ordinary circle-like corner; higher numbers are
 # "squarer" with a smoother transition. 5 is close to Apple's icon corners.
@@ -74,6 +81,10 @@ def squircle_path(rect, radius):
 class StartPanel(QWidget):
     """Floats in the middle of its parent (the canvas) and stays centred."""
 
+    # Wires for the window to connect to: "the user wants a new board / to open one".
+    new_board_requested = Signal()
+    open_requested = Signal()
+
     def __init__(self, parent):
         super().__init__(parent)
 
@@ -83,6 +94,14 @@ class StartPanel(QWidget):
         shadow.setOffset(0, 12)
         shadow.setColor(QColor(0, 0, 0, 150))
         self.setGraphicsEffect(shadow)
+
+        # The sidebar buttons: (text, shortcut, signal to emit, is it the main one?)
+        self.buttons = [
+            ("New board", QKeySequence(QKeySequence.New), self.new_board_requested, True),
+            ("Open board…", QKeySequence(QKeySequence.Open), self.open_requested, False),
+        ]
+        self.hovered = None  # number of the button under the mouse, or None
+        self.setMouseTracking(True)  # get mouse moves even without a button held
 
         self.setFixedSize(PANEL_WIDTH, PANEL_HEIGHT)
         # Watch the parent's events, so we notice when it's resized.
@@ -98,6 +117,46 @@ class StartPanel(QWidget):
             self.center_in_parent()
         return False  # False = "I only looked"; the parent still handles the event
 
+    # ---- Sidebar buttons ---------------------------------------------------
+
+    def button_rect(self, number):
+        """Where button `number` sits. Used both for drawing and for clicking."""
+        y = PADDING + TITLE_HEIGHT + number * (BUTTON_HEIGHT + BUTTON_GAP)
+        return QRectF(PADDING, y, SIDEBAR_WIDTH - PADDING * 2, BUTTON_HEIGHT)
+
+    def button_at(self, pos):
+        for number in range(len(self.buttons)):
+            if self.button_rect(number).contains(pos):
+                return number
+        return None
+
+    def mouseMoveEvent(self, event):
+        hovered = self.button_at(event.position())
+        if hovered != self.hovered:
+            self.hovered = hovered
+            self.setCursor(Qt.PointingHandCursor if hovered is not None else Qt.ArrowCursor)
+            self.update()  # ask Qt to repaint, so the hover colour shows
+
+    def leaveEvent(self, event):
+        self.hovered = None
+        self.update()
+
+    def mousePressEvent(self, event):
+        # Always accept, so clicks on the panel never fall through to the canvas.
+        event.accept()
+        number = self.button_at(event.position())
+        if event.button() == Qt.LeftButton and number is not None:
+            signal = self.buttons[number][2]
+            signal.emit()
+
+    def mouseReleaseEvent(self, event):
+        event.accept()
+
+    def wheelEvent(self, event):
+        event.accept()  # don't zoom the canvas behind the panel
+
+    # ---- Drawing -----------------------------------------------------------
+
     def paintEvent(self, event):
         painter = QPainter(self)
         painter.setRenderHint(QPainter.Antialiasing)
@@ -108,30 +167,72 @@ class StartPanel(QWidget):
         painter.setBrush(PANEL_COLOR)
         painter.drawPath(squircle_path(QRectF(self.rect()).adjusted(0.5, 0.5, -0.5, -0.5), PANEL_RADIUS))
 
-        # Tile size: as big as the height allows while keeping 16:10, but no
-        # wider than half the room. The fixed parts (padding, title, labels,
-        # gaps) are subtracted first.
-        room_width = (self.width() - PADDING * 2 - GAP) / 2
+        title_font = QFont(self.font())
+        title_font.setPointSizeF(13)
+        title_font.setWeight(QFont.DemiBold)
+        small_font = QFont(self.font())
+        small_font.setPointSizeF(10)
+
+        self.paint_sidebar(painter, title_font, small_font)
+
+        # A thin divider line between the sidebar and the recent boards.
+        painter.setPen(QPen(BORDER_COLOR, 1))
+        painter.drawLine(QPointF(SIDEBAR_WIDTH + 0.5, PADDING), QPointF(SIDEBAR_WIDTH + 0.5, self.height() - PADDING))
+
+        self.paint_recent_boards(painter, title_font, small_font)
+
+    def paint_sidebar(self, painter, title_font, small_font):
+        painter.setFont(title_font)
+        painter.setPen(TITLE_COLOR)
+        name_area = QRectF(PADDING, PADDING, SIDEBAR_WIDTH - PADDING * 2, TITLE_HEIGHT)
+        painter.drawText(name_area, Qt.AlignLeft | Qt.AlignTop, "refboard")
+
+        painter.setFont(small_font)
+        for number, (text, keys, _signal, is_main) in enumerate(self.buttons):
+            rect = self.button_rect(number)
+            hovered = number == self.hovered
+
+            # Background: the main button is always blue; the others only
+            # get a background while hovered.
+            if is_main:
+                painter.setBrush(ACCENT_HOVER_COLOR if hovered else ACCENT_COLOR)
+            elif hovered:
+                painter.setBrush(BUTTON_HOVER_COLOR)
+            else:
+                painter.setBrush(Qt.NoBrush)
+            painter.setPen(Qt.NoPen)
+            painter.drawPath(squircle_path(rect, BUTTON_RADIUS))
+
+            # Text on the left, the shortcut (e.g. "Ctrl+N") faintly on the right.
+            inner = rect.adjusted(12, 0, -12, 0)
+            painter.setPen(TITLE_COLOR)
+            painter.drawText(inner, Qt.AlignLeft | Qt.AlignVCenter, text)
+            painter.setPen(TITLE_COLOR if is_main else LABEL_COLOR)
+            painter.drawText(inner, Qt.AlignRight | Qt.AlignVCenter, keys.toString(QKeySequence.NativeText))
+
+    def paint_recent_boards(self, painter, title_font, small_font):
+        # Everything right of the sidebar.
+        area_left = SIDEBAR_WIDTH
+        area_width = self.width() - SIDEBAR_WIDTH
+
+        # Tile size: as big as fits while keeping 16:10. The fixed parts
+        # (padding, title, labels, gaps) are subtracted first.
+        room_width = (area_width - PADDING * 2 - GAP) / 2
         room_height = (self.height() - PADDING * 2 - TITLE_HEIGHT - LABEL_HEIGHT * 2 - GAP) / 2
         tile_width = min(room_width, room_height * TILE_ASPECT)
         tile_height = tile_width / TILE_ASPECT
-        # Centre the 2 x 2 grid sideways; any spare width goes to both sides.
+        # Centre the 2 x 2 grid in its area; any spare width goes to both sides.
         grid_width = tile_width * 2 + GAP
-        left = (self.width() - grid_width) / 2
+        left = area_left + (area_width - grid_width) / 2
 
         # Title, lined up with the left edge of the tiles.
-        font = QFont(self.font())
-        font.setPointSizeF(13)
-        font.setWeight(QFont.DemiBold)
-        painter.setFont(font)
+        painter.setFont(title_font)
         painter.setPen(TITLE_COLOR)
         title_area = QRectF(left, PADDING, grid_width, TITLE_HEIGHT)
         painter.drawText(title_area, Qt.AlignLeft | Qt.AlignTop, "Recent boards")
 
         # Four tiles in a 2 x 2 grid.
-        font.setPointSizeF(10)
-        font.setWeight(QFont.Normal)
-        painter.setFont(font)
+        painter.setFont(small_font)
         for number in range(4):
             row, column = divmod(number, 2)  # 0 -> (0,0), 1 -> (0,1), 2 -> (1,0), 3 -> (1,1)
             x = left + column * (tile_width + GAP)
