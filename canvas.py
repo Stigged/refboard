@@ -1,6 +1,8 @@
 """The canvas: an endless dark surface you can pan around and zoom into."""
 
 import math
+import time
+from collections import deque
 
 from PySide6.QtCore import QPoint, QPointF, Qt
 from PySide6.QtGui import QColor, QCursor, QImage, QKeySequence, QPainter, QPen, QPixmap
@@ -20,6 +22,8 @@ STACK_OFFSET = 30  # when adding several images at once, shift each one by this 
 IMAGE_SCALE_STEP = 1.1  # how much one Ctrl+scroll notch scales selected images
 MIN_IMAGE_SCALE = 0.01
 ROTATE_STEP = 15  # degrees per Alt+scroll notch, and the Shift snapping angle
+UNDO_LIMIT = 20  # how many steps Ctrl+Z can go back
+WHEEL_UNDO_PAUSE = 0.6  # seconds; scroll notches closer together than this are one undo step
 
 # Qt needs the canvas to have *some* size. A million units in every
 # direction is big enough that you'll never reach the edge.
@@ -59,6 +63,13 @@ class Canvas(QGraphicsView):
 
         self._pan_last_pos = None  # set while the middle mouse button is held
         self._handle_drag = None  # set while dragging a scale/rotate handle
+
+        # Undo history. A deque with maxlen forgets the oldest entry by itself
+        # once it's full, so we never keep more than UNDO_LIMIT steps.
+        self._undo = deque(maxlen=UNDO_LIMIT)
+        self._redo = deque(maxlen=UNDO_LIMIT)
+        self._before_left_drag = None  # snapshot taken when the left button goes down
+        self._last_wheel_edit = 0.0  # when Ctrl/Alt+scroll last changed an image
         self.centerOn(0, 0)
 
     def zoom_level(self):
@@ -95,10 +106,55 @@ class Canvas(QGraphicsView):
             if isinstance(data, QImage) and not data.isNull():
                 images.append(data)
 
+        before = self.snapshot()
         for i, image in enumerate(images):
             offset = QPointF(i * STACK_OFFSET, i * STACK_OFFSET)
             self.add_image(image, center + offset)
+        self.save_undo_step(before)
         return bool(images)
+
+    # ---- Undo / redo -------------------------------------------------------
+    #
+    # Before any change we take a "snapshot": a list of every image with its
+    # position, scale and rotation. Undo puts the previous snapshot back.
+
+    def snapshot(self):
+        return [
+            (item, item.pos(), item.scale(), item.rotation())
+            for item in self.scene().items()
+            if isinstance(item, ImageItem)
+        ]
+
+    def restore(self, snapshot):
+        wanted = [entry[0] for entry in snapshot]
+        # Remove images that weren't there yet...
+        for item in self.scene().items():
+            if isinstance(item, ImageItem) and item not in wanted:
+                self.scene().removeItem(item)
+        # ...bring back ones that were deleted, and reset everyone's position.
+        for item, pos, scale, rotation in snapshot:
+            if item.scene() is None:
+                self.scene().addItem(item)
+            item.setPos(pos)
+            item.setScale(scale)
+            item.setRotation(rotation)
+
+    def save_undo_step(self, before):
+        """Call right AFTER a change, with the snapshot from just BEFORE it."""
+        if before is None or before == self.snapshot():
+            return  # nothing actually changed, e.g. a click that only selected
+        self._undo.append(before)
+        self._redo.clear()  # a new change makes the old "future" invalid
+
+    def undo(self):
+        if self._undo:
+            self._redo.append(self.snapshot())
+            self.restore(self._undo.pop())
+
+    def redo(self):
+        if self._redo:
+            self._undo.append(self.snapshot())
+            self.restore(self._redo.pop())
 
     # ---- Drag and drop -----------------------------------------------------
 
@@ -127,9 +183,18 @@ class Canvas(QGraphicsView):
             self.add_images_from_mime(QApplication.clipboard().mimeData(), self.mapToScene(mouse))
             return
 
+        if event.matches(QKeySequence.Undo):  # Ctrl+Z
+            self.undo()
+            return
+        if event.matches(QKeySequence.Redo):  # Ctrl+Shift+Z
+            self.redo()
+            return
+
         if event.key() == Qt.Key_Delete:
+            before = self.snapshot()
             for item in self.scene().selectedItems():
                 self.scene().removeItem(item)
+            self.save_undo_step(before)
             return
         super().keyPressEvent(event)
 
@@ -144,13 +209,18 @@ class Canvas(QGraphicsView):
         ctrl = bool(event.modifiers() & Qt.ControlModifier)
         alt = bool(event.modifiers() & Qt.AltModifier)
 
-        if selected and ctrl:
+        if selected and (ctrl or alt):
+            before = self.snapshot()
             for item in selected:
-                item.setScale(max(MIN_IMAGE_SCALE, item.scale() * IMAGE_SCALE_STEP**notches))
-            return
-        if selected and alt:
-            for item in selected:
-                item.setRotation((item.rotation() + ROTATE_STEP * notches) % 360)
+                if ctrl:
+                    item.setScale(max(MIN_IMAGE_SCALE, item.scale() * IMAGE_SCALE_STEP**notches))
+                else:
+                    item.setRotation((item.rotation() + ROTATE_STEP * notches) % 360)
+            # A quick burst of scroll notches counts as one undo step, not one per notch.
+            now = time.monotonic()
+            if now - self._last_wheel_edit > WHEEL_UNDO_PAUSE:
+                self.save_undo_step(before)
+            self._last_wheel_edit = now
             return
 
         target = self.zoom_level() * ZOOM_STEP**notches
@@ -198,6 +268,9 @@ class Canvas(QGraphicsView):
             return
 
         if event.button() == Qt.LeftButton:
+            # Whatever this left-drag does (move, scale, rotate), it becomes
+            # one undo step when the button is released.
+            self._before_left_drag = self.snapshot()
             hit = self.handle_at(pos)
             if hit is not None:
                 item, mode = hit
@@ -263,10 +336,25 @@ class Canvas(QGraphicsView):
             self._pan_last_pos = None
             self.viewport().unsetCursor()
             return
-        if event.button() == Qt.LeftButton and self._handle_drag is not None:
-            self._handle_drag = None
+        if event.button() == Qt.LeftButton:
+            if self._handle_drag is not None:
+                self._handle_drag = None
+            else:
+                super().mouseReleaseEvent(event)  # let Qt finish moving the images
+            self.save_undo_step(self._before_left_drag)
+            self._before_left_drag = None
             return
         super().mouseReleaseEvent(event)
+
+    def mouseDoubleClickEvent(self, event):
+        # Double-click an image to straighten it (rotation back to 0, "north up").
+        item = self.itemAt(event.position().toPoint())
+        if event.button() == Qt.LeftButton and isinstance(item, ImageItem):
+            before = self.snapshot()
+            item.setRotation(0)
+            self.save_undo_step(before)
+            return
+        super().mouseDoubleClickEvent(event)
 
     # ---- Background --------------------------------------------------------
 
