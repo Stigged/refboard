@@ -4,7 +4,9 @@ import math
 import time
 from collections import deque
 
-from PySide6.QtCore import QPoint, QPointF, Qt
+from pathlib import Path
+
+from PySide6.QtCore import QPoint, QPointF, Qt, Signal
 from PySide6.QtGui import QColor, QCursor, QImage, QKeySequence, QPainter, QPen, QPixmap
 from PySide6.QtWidgets import QApplication, QFrame, QGraphicsScene, QGraphicsView
 
@@ -30,12 +32,17 @@ WHEEL_UNDO_PAUSE = 0.6  # seconds; scroll notches closer together than this are 
 CANVAS_SIZE = 1_000_000
 
 
-class Canvas(QGraphicsView): 
+class Canvas(QGraphicsView):
     """A QGraphicsView is a window onto a QGraphicsScene.
 
     The scene holds the items (later: your images). The view decides which
     part of the scene you see and how zoomed in you are.
     """
+
+    # A signal is like a wire other parts of the program can connect to.
+    # We "emit" it whenever the board changes, so the window can mark
+    # itself as having unsaved changes.
+    changed = Signal()
 
     def __init__(self):
         super().__init__()
@@ -76,13 +83,35 @@ class Canvas(QGraphicsView):
         """1.0 means 100%. m11 is the horizontal scale factor of the view."""
         return self.transform().m11()
 
+    def view_center(self):
+        """The canvas point currently in the middle of the window."""
+        return self.mapToScene(self.viewport().rect().center())
+
+    def set_view(self, zoom, center):
+        """Jump to a zoom level and centre point (used when opening a board)."""
+        self.resetTransform()
+        self.scale(zoom, zoom)
+        self.centerOn(center)
+
     # ---- Adding images -----------------------------------------------------
 
-    def add_image(self, image, center):
+    def add_image(self, image, center, data=None, extension="png"):
         """Put a QImage on the canvas, centred on `center` (in canvas units)."""
-        item = ImageItem(image)
+        item = ImageItem(image, data, extension)
         item.setPos(center - QPointF(image.width() / 2, image.height() / 2))
         self.scene().addItem(item)
+        return item
+
+    def images(self):
+        """All images on the board, bottom-most first."""
+        return [item for item in reversed(self.scene().items()) if isinstance(item, ImageItem)]
+
+    def clear_board(self):
+        """Remove every image and forget the undo history (used when opening a file)."""
+        for item in self.images():
+            self.scene().removeItem(item)
+        self._undo.clear()
+        self._redo.clear()
 
     def add_images_from_mime(self, mime, center):
         """Add every image found in dropped or pasted data. Returns True if any were added.
@@ -90,26 +119,32 @@ class Canvas(QGraphicsView):
         "Mime data" is Qt's name for a package of data in several formats,
         used by both drag-and-drop and the clipboard.
         """
-        images = []
+        images = []  # a list of (image, original file bytes, file extension)
         # Files, e.g. dragged in from Dolphin or copied in a file manager.
         if mime.hasUrls():
             for url in mime.urls():
                 if url.isLocalFile():
-                    image = QImage(url.toLocalFile())
+                    path = Path(url.toLocalFile())
+                    try:
+                        data = path.read_bytes()
+                    except OSError:  # e.g. it's a folder, or we may not read it
+                        continue
+                    image = QImage.fromData(data)
                     if not image.isNull():  # isNull means "not an image we can read"
-                        images.append(image)
+                        extension = path.suffix.lstrip(".").lower() or "png"
+                        images.append((image, data, extension))
         # Raw image data, e.g. "Copy image" in a browser, or a screenshot.
         if not images and mime.hasImage():
             data = mime.imageData()
             if isinstance(data, QPixmap):
                 data = data.toImage()
             if isinstance(data, QImage) and not data.isNull():
-                images.append(data)
+                images.append((data, None, "png"))
 
         before = self.snapshot()
-        for i, image in enumerate(images):
+        for i, (image, data, extension) in enumerate(images):
             offset = QPointF(i * STACK_OFFSET, i * STACK_OFFSET)
-            self.add_image(image, center + offset)
+            self.add_image(image, center + offset, data, extension)
         self.save_undo_step(before)
         return bool(images)
 
@@ -145,16 +180,19 @@ class Canvas(QGraphicsView):
             return  # nothing actually changed, e.g. a click that only selected
         self._undo.append(before)
         self._redo.clear()  # a new change makes the old "future" invalid
+        self.changed.emit()
 
     def undo(self):
         if self._undo:
             self._redo.append(self.snapshot())
             self.restore(self._undo.pop())
+            self.changed.emit()
 
     def redo(self):
         if self._redo:
             self._undo.append(self.snapshot())
             self.restore(self._redo.pop())
+            self.changed.emit()
 
     # ---- Drag and drop -----------------------------------------------------
 

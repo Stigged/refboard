@@ -2,7 +2,7 @@
 
 import math
 
-from PySide6.QtCore import QPointF, QRectF, Qt
+from PySide6.QtCore import QBuffer, QIODevice, QPointF, QRectF, Qt
 from PySide6.QtGui import QColor, QPen, QPixmap
 from PySide6.QtWidgets import QGraphicsItem, QGraphicsPixmapItem, QStyle
 
@@ -21,13 +21,31 @@ class ImageItem(QGraphicsPixmapItem):
     image stays where it is while it grows, shrinks or turns.
     """
 
-    def __init__(self, image):
+    def __init__(self, image, data=None, extension="png"):
+        """`data` is the original file's bytes, if the image came from a file.
+
+        We keep them so saving a board stores the image exactly as it was
+        (a JPG stays a small JPG) instead of re-encoding it.
+        """
         super().__init__(QPixmap.fromImage(image))
+        self.data = data
+        self.extension = extension
         self.setTransformationMode(Qt.SmoothTransformation)
         # Let the user click to select it and drag it around.
         self.setFlags(QGraphicsItem.ItemIsMovable | QGraphicsItem.ItemIsSelectable)
         # Scale and rotate around the middle instead of the top-left corner.
         self.setTransformOriginPoint(self.local_rect().center())
+
+    def file_data(self):
+        """The image as file bytes plus a file extension, ready for saving."""
+        if self.data is None:
+            # Pasted images have no original file, so turn them into a PNG once.
+            buffer = QBuffer()
+            buffer.open(QIODevice.WriteOnly)
+            self.pixmap().save(buffer, "PNG")
+            self.data = bytes(buffer.data())
+            self.extension = "png"
+        return self.data, self.extension
 
     def local_rect(self):
         """The image's rectangle in its own units (before scaling/rotating)."""
