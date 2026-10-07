@@ -9,9 +9,12 @@ from PySide6.QtWidgets import QApplication, QFileDialog, QMainWindow, QMessageBo
 
 from board_file import FILE_EXTENSION, BoardFileError, load_board, save_board
 from canvas import Canvas
-from start_panel import StartPanel
+from start_panel import MIN_WINDOW_HEIGHT, MIN_WINDOW_WIDTH, StartPanel
 
 FILE_FILTER = f"refboard boards (*{FILE_EXTENSION})"
+# Once the start panel is closed, the window may get this small.
+SMALLEST_WINDOW_WIDTH = 200
+SMALLEST_WINDOW_HEIGHT = 150
 
 
 class MainWindow(QMainWindow):
@@ -22,6 +25,8 @@ class MainWindow(QMainWindow):
         self.canvas = Canvas()
         self.setCentralWidget(self.canvas)
         self.resize(1000, 700)
+        # While the start panel shows, the window must be big enough for it.
+        self.setMinimumSize(MIN_WINDOW_WIDTH, MIN_WINDOW_HEIGHT)
 
         self.path = None  # the file this board was opened from / saved to
         # Connect the canvas's "changed" signal to our method: every time the
@@ -30,14 +35,20 @@ class MainWindow(QMainWindow):
 
         # The recent-boards panel floats over the canvas until you start working.
         self.start_panel = StartPanel(self.canvas)
-        self.canvas.changed.connect(self.start_panel.hide)
+        self.canvas.changed.connect(self.close_start_panel)
 
         self.add_shortcut(QKeySequence.Save, self.save)  # Ctrl+S
         self.add_shortcut(QKeySequence.SaveAs, self.save_as)  # Ctrl+Shift+S
         self.add_shortcut(QKeySequence.Open, self.open)  # Ctrl+O
-        self.add_shortcut(QKeySequence(Qt.Key_Escape), self.start_panel.hide)
+        self.add_shortcut(QKeySequence(Qt.Key_Escape), self.close_start_panel)
 
         self.update_title()
+
+    def close_start_panel(self):
+        """Hide the start panel and let the window shrink again (handy for a
+        small reference window in a screen corner)."""
+        self.start_panel.hide()
+        self.setMinimumSize(SMALLEST_WINDOW_WIDTH, SMALLEST_WINDOW_HEIGHT)
 
     def add_shortcut(self, keys, method):
         """Run `method` when `keys` are pressed anywhere in the window."""
@@ -95,7 +106,7 @@ class MainWindow(QMainWindow):
         self.path = path
         self.setWindowModified(False)
         self.update_title()
-        self.start_panel.hide()
+        self.close_start_panel()
 
     def save(self):
         """Save to the current file (or ask for one). Returns True if it was saved."""

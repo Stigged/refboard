@@ -16,10 +16,14 @@ TILE_COLOR = QColor("#3A3A3C")
 TITLE_COLOR = QColor("#E5E5EA")
 LABEL_COLOR = QColor("#8E8E93")
 
-# Sizes, in pixels.
-PANEL_FRACTION = 0.66  # the panel takes up 66% of the window's width and height
-MIN_PANEL_WIDTH = 360  # ...but never smaller than this (unless the window is)
-MIN_PANEL_HEIGHT = 300
+# Sizes, in pixels. The panel has one fixed size; the window's minimum size
+# is built around it, so it always fits.
+PANEL_WIDTH = 900
+PANEL_HEIGHT = 555
+WINDOW_MARGIN = 40  # minimum space between the panel and the window's edges
+MIN_WINDOW_WIDTH = PANEL_WIDTH + WINDOW_MARGIN * 2
+MIN_WINDOW_HEIGHT = PANEL_HEIGHT + WINDOW_MARGIN * 2
+TILE_ASPECT = 16 / 10  # tiles are screenshot-shaped (width:height)
 PADDING = 24  # space between the panel's edge and its contents
 TITLE_HEIGHT = 40
 LABEL_HEIGHT = 30  # room for the board name under each tile
@@ -68,7 +72,7 @@ def squircle_path(rect, radius):
 
 
 class StartPanel(QWidget):
-    """Floats in the middle of its parent (the canvas), sized as a share of it."""
+    """Floats in the middle of its parent (the canvas) and stays centred."""
 
     def __init__(self, parent):
         super().__init__(parent)
@@ -80,23 +84,18 @@ class StartPanel(QWidget):
         shadow.setColor(QColor(0, 0, 0, 150))
         self.setGraphicsEffect(shadow)
 
+        self.setFixedSize(PANEL_WIDTH, PANEL_HEIGHT)
         # Watch the parent's events, so we notice when it's resized.
         parent.installEventFilter(self)
-        self.fit_to_parent()
+        self.center_in_parent()
 
-    def fit_to_parent(self):
-        """Resize to PANEL_FRACTION of the parent, and centre on it."""
+    def center_in_parent(self):
         parent = self.parentWidget()
-        width = max(MIN_PANEL_WIDTH, round(parent.width() * PANEL_FRACTION))
-        height = max(MIN_PANEL_HEIGHT, round(parent.height() * PANEL_FRACTION))
-        # In a really small window, don't stick out past its edges.
-        width = min(width, parent.width())
-        height = min(height, parent.height())
-        self.setGeometry((parent.width() - width) // 2, (parent.height() - height) // 2, width, height)
+        self.move((parent.width() - self.width()) // 2, (parent.height() - self.height()) // 2)
 
     def eventFilter(self, watched, event):
         if event.type() == QEvent.Resize:
-            self.fit_to_parent()
+            self.center_in_parent()
         return False  # False = "I only looked"; the parent still handles the event
 
     def paintEvent(self, event):
@@ -109,25 +108,33 @@ class StartPanel(QWidget):
         painter.setBrush(PANEL_COLOR)
         painter.drawPath(squircle_path(QRectF(self.rect()).adjusted(0.5, 0.5, -0.5, -0.5), PANEL_RADIUS))
 
-        # Title.
+        # Tile size: as big as the height allows while keeping 16:10, but no
+        # wider than half the room. The fixed parts (padding, title, labels,
+        # gaps) are subtracted first.
+        room_width = (self.width() - PADDING * 2 - GAP) / 2
+        room_height = (self.height() - PADDING * 2 - TITLE_HEIGHT - LABEL_HEIGHT * 2 - GAP) / 2
+        tile_width = min(room_width, room_height * TILE_ASPECT)
+        tile_height = tile_width / TILE_ASPECT
+        # Centre the 2 x 2 grid sideways; any spare width goes to both sides.
+        grid_width = tile_width * 2 + GAP
+        left = (self.width() - grid_width) / 2
+
+        # Title, lined up with the left edge of the tiles.
         font = QFont(self.font())
         font.setPointSizeF(13)
         font.setWeight(QFont.DemiBold)
         painter.setFont(font)
         painter.setPen(TITLE_COLOR)
-        title_area = QRectF(PADDING, PADDING, self.width() - PADDING * 2, TITLE_HEIGHT)
+        title_area = QRectF(left, PADDING, grid_width, TITLE_HEIGHT)
         painter.drawText(title_area, Qt.AlignLeft | Qt.AlignTop, "Recent boards")
 
-        # Four tiles in a 2 x 2 grid. They share whatever room is left after
-        # the padding, title, labels and gaps, so they grow with the panel.
-        tile_width = (self.width() - PADDING * 2 - GAP) / 2
-        tile_height = (self.height() - PADDING * 2 - TITLE_HEIGHT - LABEL_HEIGHT * 2 - GAP) / 2
+        # Four tiles in a 2 x 2 grid.
         font.setPointSizeF(10)
         font.setWeight(QFont.Normal)
         painter.setFont(font)
         for number in range(4):
             row, column = divmod(number, 2)  # 0 -> (0,0), 1 -> (0,1), 2 -> (1,0), 3 -> (1,1)
-            x = PADDING + column * (tile_width + GAP)
+            x = left + column * (tile_width + GAP)
             y = PADDING + TITLE_HEIGHT + row * (tile_height + LABEL_HEIGHT + GAP)
 
             painter.setPen(Qt.NoPen)
