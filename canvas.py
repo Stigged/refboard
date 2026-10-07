@@ -480,6 +480,13 @@ class Canvas(QGraphicsView):
             # space" and clears the selection, even mid-drag.
             return
 
+        if event.button() == Qt.LeftButton and event.modifiers() & Qt.AltModifier:
+            # Alt+drag moves the whole window. startSystemMove hands the drag
+            # to the window manager (KWin), so it feels native: snapping to
+            # screen edges and all. Works on Wayland too.
+            self.window().windowHandle().startSystemMove()
+            return
+
         if event.button() == Qt.LeftButton:
             ctrl = bool(event.modifiers() & Qt.ControlModifier)
             hit = self.handle_at(pos, ctrl)
