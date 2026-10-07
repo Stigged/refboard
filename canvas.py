@@ -1,17 +1,20 @@
 """The canvas: an endless dark surface you can pan around and zoom into."""
 
+import functools
 import math
 import time
 from collections import deque
 
 from pathlib import Path
 
-from PySide6.QtCore import QEvent, QPoint, QPointF, QRect, QRectF, Qt, Signal
+from PySide6.QtCore import QEvent, QLineF, QPoint, QPointF, QRect, QRectF, Qt, Signal
 from PySide6.QtGui import QColor, QCursor, QImage, QKeySequence, QPainter, QPen, QPixmap
 from PySide6.QtWidgets import QApplication, QFrame, QGraphicsScene, QGraphicsView
 
+from board_item import HANDLE_GRAB, ROTATE_GRAB, BoardItem
 from context_menu import show_context_menu
-from image_item import HANDLE_GRAB, MIN_CROP_SIZE, ROTATE_GRAB, ImageItem
+from image_item import MIN_CROP_SIZE, ImageItem
+from note_item import NoteItem
 
 # Look and feel. Tweak these freely.
 # Colors borrowed from Apple's dark-mode system grays.
@@ -19,6 +22,7 @@ BACKGROUND_COLOR = QColor("#1C1C1E")  # Apple "systemGray6"
 DOT_COLOR = QColor("#3A3A3C")  # Apple "systemGray4"
 SELECTION_BOX_FILL = QColor(255, 255, 255, 20)  # light gray, very see-through (alpha 0-255)
 SELECTION_BOX_BORDER = QColor(255, 255, 255, 60)
+SNAP_GUIDE_COLOR = QColor("#FF375F")  # Apple "systemPink": stands out from the blue selection
 DOT_SPACING = 50  # distance between grid dots, in canvas units
 ZOOM_STEP = 1.15  # how much one scroll-wheel notch zooms
 MIN_ZOOM = 0.02
@@ -32,6 +36,9 @@ ROTATE_STEP = 15  # degrees per Alt+scroll notch, and the Shift snapping angle
 FIT_MARGIN = 0.05  # "fit all" leaves this much room around the images (5%)
 UNDO_LIMIT = 20  # how many steps Ctrl+Z can go back
 WHEEL_UNDO_PAUSE = 0.6  # seconds; scroll notches closer together than this are one undo step
+DUPLICATE_OFFSET = 20  # Ctrl+D puts the copy this many screen pixels down and right
+ARRANGE_GAP = 10  # space between arranged images, in screen pixels
+SNAP_DISTANCE = 8  # dragged images snap when an edge is this close, in screen pixels
 
 # Qt needs the canvas to have *some* size. A million units in every
 # direction is big enough that you'll never reach the edge.
@@ -100,6 +107,10 @@ class Canvas(QGraphicsView):
         self._box = None  # set while dragging a selection box on empty canvas
         self.crop_item = None  # the image in crop mode, if any
         self._crop_before = None  # snapshot from when crop mode started, for undo/cancel
+        self.editing_note = None  # the note you're typing in, if any
+        self._edit_before = None  # snapshot from when typing started, for undo
+        self._moving = False  # True while Qt drags images around (left-drag on an image)
+        self._guides = []  # snap guide lines to draw, in canvas units
 
         # Undo history. A deque with maxlen forgets the oldest entry by itself
         # once it's full, so we never keep more than UNDO_LIMIT steps.
@@ -126,20 +137,38 @@ class Canvas(QGraphicsView):
     # ---- Adding images -----------------------------------------------------
 
     def add_image(self, image, center, data=None, extension="png"):
-        """Put a QImage on the canvas, centred on `center` (in canvas units)."""
+        """Put a QImage (or QPixmap) on the canvas, centred on `center` (in canvas units)."""
         item = ImageItem(image, data, extension)
         item.setPos(center - QPointF(image.width() / 2, image.height() / 2))
-        # New images go on top of everything already there.
-        existing = self.images()
+        self.place_item(item)
+        return item
+
+    def add_note(self, text, top_left, scale=None):
+        """Put a text note on the canvas with its top-left corner at `top_left`.
+
+        Without a `scale`, the note is sized to look the same at any zoom level.
+        """
+        note = NoteItem(text)
+        note.setPos(top_left)
+        note.setScale(scale if scale is not None else 1 / self.zoom_level())
+        self.place_item(note)
+        return note
+
+    def place_item(self, item):
+        """Put a new image or note on the board, on top of everything else."""
+        existing = self.board_items()
         item.setZValue(existing[-1].zValue() + 1 if existing else 0)
         self.scene().addItem(item)
-        return item
+        if isinstance(item, NoteItem):
+            # "Queued" means: call finish_editing a moment later, once Qt is
+            # done handling the focus change, not in the middle of it.
+            item.editing_finished.connect(self.finish_editing, Qt.QueuedConnection)
 
     def render_preview(self):
         """A small picture of the whole board, for the start panel's tiles."""
         image = QImage(PREVIEW_WIDTH, PREVIEW_HEIGHT, QImage.Format_RGB32)
         image.fill(BACKGROUND_COLOR)
-        if not self.images():
+        if not self.board_items():
             return image
 
         # The area that holds every image, plus a 5% margin around it.
@@ -159,20 +188,41 @@ class Canvas(QGraphicsView):
             item.setSelected(True)
         return image
 
+    def board_items(self):
+        """Everything on the board (images and notes), bottom-most first."""
+        return [item for item in reversed(self.scene().items()) if isinstance(item, BoardItem)]
+
     def images(self):
         """All images on the board, bottom-most first."""
-        return [item for item in reversed(self.scene().items()) if isinstance(item, ImageItem)]
+        return [item for item in self.board_items() if isinstance(item, ImageItem)]
+
+    def selected_items(self):
+        """The selected images and notes, bottom-most first."""
+        return [item for item in self.board_items() if item.isSelected()]
+
+    def selected_images(self):
+        return [item for item in self.selected_items() if isinstance(item, ImageItem)]
 
     def clear_board(self):
-        """Remove every image and forget the undo history (used when opening a file)."""
+        """Remove everything and forget the undo history (used when opening a file)."""
+        self.finish_editing()
         self.crop_item = None
-        for item in self.images():
+        for item in self.board_items():
             self.scene().removeItem(item)
         self._undo.clear()
         self._redo.clear()
 
-    def add_images_from_mime(self, mime, center):
-        """Add every image found in dropped or pasted data. Returns True if any were added.
+    def mouse_scene_pos(self):
+        """Where the mouse is on the canvas, or the middle of the window if it's outside."""
+        mouse = self.viewport().mapFromGlobal(QCursor.pos())
+        if not self.viewport().rect().contains(mouse):
+            mouse = self.viewport().rect().center()
+        return self.mapToScene(mouse)
+
+    def add_from_mime(self, mime, center):
+        """Add every image found in dropped or pasted data. Returns True if anything was added.
+
+        Plain text (with no files or images) becomes a text note instead.
 
         "Mime data" is Qt's name for a package of data in several formats,
         used by both drag-and-drop and the clipboard.
@@ -199,41 +249,39 @@ class Canvas(QGraphicsView):
             if isinstance(data, QImage) and not data.isNull():
                 images.append((data, None, "png"))
 
+        text = mime.text().strip() if mime.hasText() and not mime.hasUrls() else ""
+
+        self.settle()
         before = self.snapshot()
         for i, (image, data, extension) in enumerate(images):
             offset = QPointF(i * STACK_OFFSET, i * STACK_OFFSET)
             self.add_image(image, center + offset, data, extension)
+        if not images and text:
+            self.add_note(text, center)
         self.save_undo_step(before)
-        return bool(images)
+        return bool(images or text)
 
     # ---- Undo / redo -------------------------------------------------------
     #
-    # Before any change we take a "snapshot": a list of every image with its
-    # crop, position, scale, rotation and stacking height. Undo puts the
-    # previous snapshot back.
+    # Before any change we take a "snapshot": a list of every image and note
+    # with its "state" (position, scale, rotation, stacking height, crop,
+    # text, ...; see state() in image_item.py and note_item.py). Undo puts
+    # the previous snapshot back.
 
     def snapshot(self):
-        return [
-            (item, QRect(item.crop), item.pos(), item.scale(), item.rotation(), item.zValue())
-            for item in self.scene().items()
-            if isinstance(item, ImageItem)
-        ]
+        return [(item, item.state()) for item in self.board_items()]
 
     def restore(self, snapshot):
-        wanted = [entry[0] for entry in snapshot]
-        # Remove images that weren't there yet...
-        for item in self.scene().items():
-            if isinstance(item, ImageItem) and item not in wanted:
+        wanted = [item for item, _state in snapshot]
+        # Remove things that weren't there yet...
+        for item in self.board_items():
+            if item not in wanted:
                 self.scene().removeItem(item)
-        # ...bring back ones that were deleted, and reset everyone's position.
-        for item, crop, pos, scale, rotation, z in snapshot:
+        # ...bring back ones that were deleted, and put everyone back how they were.
+        for item, state in snapshot:
             if item.scene() is None:
                 self.scene().addItem(item)
-            item.set_crop(crop)  # before setPos: set_crop nudges the position itself
-            item.setPos(pos)
-            item.setScale(scale)
-            item.setRotation(rotation)
-            item.setZValue(z)
+            item.set_state(state)
 
     def save_undo_step(self, before):
         """Call right AFTER a change, with the snapshot from just BEFORE it."""
@@ -250,14 +298,14 @@ class Canvas(QGraphicsView):
         return bool(self._redo)
 
     def undo(self):
-        self.finish_crop()
+        self.settle()
         if self._undo:
             self._redo.append(self.snapshot())
             self.restore(self._undo.pop())
             self.changed.emit()
 
     def redo(self):
-        self.finish_crop()
+        self.settle()
         if self._redo:
             self._undo.append(self.snapshot())
             self.restore(self._redo.pop())
@@ -267,7 +315,7 @@ class Canvas(QGraphicsView):
 
     def dragEnterEvent(self, event):
         mime = event.mimeData()
-        if mime.hasUrls() or mime.hasImage():
+        if mime.hasUrls() or mime.hasImage() or mime.hasText():
             event.acceptProposedAction()
 
     def dragMoveEvent(self, event):
@@ -276,7 +324,7 @@ class Canvas(QGraphicsView):
 
     def dropEvent(self, event):
         center = self.mapToScene(event.position().toPoint())
-        if self.add_images_from_mime(event.mimeData(), center):
+        if self.add_from_mime(event.mimeData(), center):
             event.acceptProposedAction()
 
     # ---- Crop mode ---------------------------------------------------------
@@ -286,10 +334,11 @@ class Canvas(QGraphicsView):
         if self.crop_item is not None:
             self.finish_crop()
             return
-        selected = self.scene().selectedItems()
+        self.finish_editing()
+        selected = self.selected_images()
         if not selected:
             return
-        self.crop_item = selected[0]
+        self.crop_item = selected[-1]  # the top-most one
         self._crop_before = self.snapshot()
         self.crop_item.set_cropping(True)
         self.crop_mode_changed.emit()
@@ -312,13 +361,156 @@ class Canvas(QGraphicsView):
         self.crop_mode_changed.emit()
         self.restore(self._crop_before)
 
-    # ---- Other actions (used by keys and the tool panel) -------------------
+    def settle(self):
+        """Finish whatever we're in the middle of (cropping, typing a note)
+        before doing something else."""
+        self.finish_editing()
+        self.finish_crop()
+
+    # ---- Text notes --------------------------------------------------------
+
+    def new_note_at(self, scene_pos):
+        """Make an empty note at `scene_pos`, and start typing in it."""
+        self.settle()
+        before = self.snapshot()
+        self.start_editing(self.add_note("", scene_pos), before)
+
+    def new_note_at_mouse(self):
+        self.new_note_at(self.mouse_scene_pos())
+
+    def start_editing(self, note, before):
+        """Start typing in `note`. `before` is the snapshot to undo back to."""
+        self.settle()
+        self.editing_note = note
+        self._edit_before = before
+        self.scene().clearSelection()  # no handles while typing
+        note.start_editing()
+
+    def finish_editing(self):
+        """Stop typing. An empty note is thrown away. Typing is one undo step."""
+        note = self.editing_note
+        if note is None:
+            return
+        self.editing_note = None
+        note.stop_editing()
+        if not note.toPlainText().strip():
+            self.scene().removeItem(note)
+        self.save_undo_step(self._edit_before)
+
+    # ---- Other actions (used by keys, the tool panel and the menu) ---------
 
     def delete_selected(self):
-        self.finish_crop()
+        self.settle()
         before = self.snapshot()
         for item in self.scene().selectedItems():
             self.scene().removeItem(item)
+        self.save_undo_step(before)
+
+    def select_all(self):
+        self.settle()
+        for item in self.board_items():
+            item.setSelected(True)
+
+    def copy_selected(self):
+        """Copy the top-most selected image to the clipboard, as you see it
+        (cropped, flipped, gray). With only notes selected, copy their text."""
+        selected = self.selected_items()
+        images = [item for item in selected if isinstance(item, ImageItem)]
+        if images:
+            # pixmap() is exactly the visible part, at the image's full resolution.
+            QApplication.clipboard().setImage(images[-1].pixmap().toImage())
+        elif selected:
+            # Top to bottom, like reading the board.
+            notes = sorted(selected, key=lambda note: note.scene_rect().top())
+            QApplication.clipboard().setText("\n\n".join(note.toPlainText() for note in notes))
+
+    def duplicate_selected(self):
+        """Copies of the selected things, a bit down and to the right, on top of everything."""
+        self.settle()
+        originals = self.selected_items()  # bottom-most first, so the copies stack the same way
+        if not originals:
+            return
+        before = self.snapshot()
+        shift = DUPLICATE_OFFSET / self.zoom_level()
+        self.scene().clearSelection()
+        for item in originals:
+            copy = item.clone()
+            copy.moveBy(shift, shift)
+            self.place_item(copy)
+            copy.setSelected(True)  # so you can drag the copies straight away
+        self.save_undo_step(before)
+
+    def toggle_grayscale(self):
+        """Black and white on or off for the selected images. If some are in
+        color and some aren't, they all become black and white."""
+        self.settle()
+        images = self.selected_images()
+        if not images:
+            return
+        before = self.snapshot()
+        gray = not self.selected_all_gray()
+        for item in images:
+            item.set_grayscale(gray)
+        self.save_undo_step(before)
+
+    def selected_all_gray(self):
+        images = self.selected_images()
+        return bool(images) and all(item.grayscale for item in images)
+
+    def flip_selected(self, horizontal):
+        self.settle()
+        before = self.snapshot()
+        for item in self.selected_images():
+            item.flip(horizontal)
+        self.save_undo_step(before)
+
+    def flip_horizontal(self):
+        self.flip_selected(True)
+
+    def flip_vertical(self):
+        self.flip_selected(False)
+
+    def arrange_selected(self):
+        """Lay the selected things out in neat rows, starting where they are now.
+
+        Rows are filled left to right, and each row is as wide as makes the
+        whole block roughly the shape of the window.
+        """
+        self.settle()
+        items = self.selected_items()
+        if len(items) < 2:
+            return
+        before = self.snapshot()
+        rects = {item: item.scene_rect() for item in items}
+
+        # Keep the order you see: group into rows (top to bottom), then
+        # read each row left to right.
+        items.sort(key=lambda item: rects[item].center().y())
+        rows = []
+        row_bottom = None
+        for item in items:
+            if rows and rects[item].center().y() < row_bottom:
+                rows[-1].append(item)
+                row_bottom = max(row_bottom, rects[item].bottom())
+            else:
+                rows.append([item])
+                row_bottom = rects[item].bottom()
+        order = [item for row in rows for item in sorted(row, key=lambda i: rects[i].left())]
+
+        gap = ARRANGE_GAP / self.zoom_level()
+        area = sum((r.width() + gap) * (r.height() + gap) for r in rects.values())
+        window = self.viewport().rect()
+        width = max(max(r.width() for r in rects.values()), math.sqrt(area * window.width() / window.height()))
+
+        start = functools.reduce(QRectF.united, rects.values())  # around all of them
+        x, y, row_height = start.left(), start.top(), 0
+        for item in order:
+            r = rects[item]
+            if x > start.left() and x + r.width() > start.left() + width:
+                x, y, row_height = start.left(), y + row_height + gap, 0  # next row
+            item.setPos(item.pos() + QPointF(x, y) - r.topLeft())
+            x += r.width() + gap
+            row_height = max(row_height, r.height())
         self.save_undo_step(before)
 
     # ---- Stacking order: which image is drawn on top ----------------------
@@ -328,19 +520,19 @@ class Canvas(QGraphicsView):
     # shuffles the list and hands out the numbers again.
 
     def restack(self, order):
-        """Give the images in `order` (bottom-most first) Z values 0, 1, 2, ..."""
-        self.finish_crop()
+        """Give the items in `order` (bottom-most first) Z values 0, 1, 2, ..."""
+        self.settle()
         before = self.snapshot()
         for z, item in enumerate(order):
             item.setZValue(z)
         self.save_undo_step(before)
 
     def bring_to_front(self):
-        order = self.images()
+        order = self.board_items()
         self.restack([i for i in order if not i.isSelected()] + [i for i in order if i.isSelected()])
 
     def send_to_back(self):
-        order = self.images()
+        order = self.board_items()
         self.restack([i for i in order if i.isSelected()] + [i for i in order if not i.isSelected()])
 
     def raise_selected(self):
@@ -349,7 +541,7 @@ class Canvas(QGraphicsView):
         Images that don't overlap don't count: swapping with an image on the
         other side of the board would look like nothing happened.
         """
-        order = self.images()
+        order = self.board_items()
         # Top-most first, so the selected images don't leapfrog each other.
         for item in sorted(self.scene().selectedItems(), key=lambda i: -i.zValue()):
             here = order.index(item)
@@ -362,7 +554,7 @@ class Canvas(QGraphicsView):
 
     def lower_selected(self):
         """Like raise_selected, but downwards."""
-        order = self.images()
+        order = self.board_items()
         for item in sorted(self.scene().selectedItems(), key=lambda i: i.zValue()):
             here = order.index(item)
             for below in range(here - 1, -1, -1):
@@ -374,7 +566,7 @@ class Canvas(QGraphicsView):
 
     def straighten_selected(self):
         """Turn the selected images back to 0 degrees ("north up")."""
-        self.finish_crop()
+        self.settle()
         before = self.snapshot()
         for item in self.scene().selectedItems():
             item.setRotation(0)
@@ -384,8 +576,8 @@ class Canvas(QGraphicsView):
         return any(item.rotation() != 0 for item in self.scene().selectedItems())
 
     def fit_all(self):
-        """Zoom and pan so every image fits in the window."""
-        if not self.images():
+        """Zoom and pan so everything fits in the window."""
+        if not self.board_items():
             return
         area = self.scene().itemsBoundingRect()
         margin = max(area.width(), area.height()) * FIT_MARGIN
@@ -399,10 +591,10 @@ class Canvas(QGraphicsView):
     def event(self, event):
         # Esc is also a window-wide shortcut (it closes the start panel). Qt
         # asks the focused widget first with a "ShortcutOverride" event;
-        # while cropping, we say "this key is mine" so Esc cancels the crop.
+        # while cropping or typing, we say "this key is mine" so Esc ends that.
         if (
             event.type() == QEvent.ShortcutOverride
-            and self.crop_item is not None
+            and (self.crop_item is not None or self.editing_note is not None)
             and event.key() == Qt.Key_Escape
         ):
             event.accept()
@@ -412,6 +604,14 @@ class Canvas(QGraphicsView):
     # ---- Keyboard ----------------------------------------------------------
 
     def keyPressEvent(self, event):
+        # While typing in a note, every key goes to the note. Esc stops typing.
+        if self.editing_note is not None:
+            if event.key() == Qt.Key_Escape:
+                self.finish_editing()
+                return
+            super().keyPressEvent(event)  # QGraphicsView passes it on to the note
+            return
+
         if self.crop_item is not None:
             if event.key() in (Qt.Key_Return, Qt.Key_Enter):
                 self.finish_crop()
@@ -419,24 +619,10 @@ class Canvas(QGraphicsView):
             if event.key() == Qt.Key_Escape:
                 self.cancel_crop()
                 return
-        if event.key() == Qt.Key_C and event.modifiers() == Qt.NoModifier:
-            self.toggle_crop()
-            return
-        if event.key() == Qt.Key_F and event.modifiers() == Qt.NoModifier:
-            self.fit_all()
-            return
-        # Pasting while cropping finishes the crop first.
-        if self.crop_item is not None and event.matches(QKeySequence.Paste):
-            self.finish_crop()
 
-        if event.matches(QKeySequence.Paste):
-            # Paste where the mouse is, or in the middle if it's outside the window.
-            mouse = self.viewport().mapFromGlobal(QCursor.pos())
-            if not self.viewport().rect().contains(mouse):
-                mouse = self.viewport().rect().center()
-            self.add_images_from_mime(QApplication.clipboard().mimeData(), self.mapToScene(mouse))
+        if event.matches(QKeySequence.Paste):  # Ctrl+V
+            self.add_from_mime(QApplication.clipboard().mimeData(), self.mouse_scene_pos())
             return
-
         if event.matches(QKeySequence.Undo):  # Ctrl+Z
             self.undo()
             return
@@ -448,14 +634,25 @@ class Canvas(QGraphicsView):
             self.delete_selected()
             return
 
-        # Stacking order: Ctrl+] / Ctrl+[ = all the way, ] / [ = one step.
-        stacking = {
+        # (key, modifier keys held) -> what to do.
+        actions = {
+            (Qt.Key_C, Qt.NoModifier): self.toggle_crop,
+            (Qt.Key_F, Qt.NoModifier): self.fit_all,
+            (Qt.Key_G, Qt.NoModifier): self.toggle_grayscale,
+            (Qt.Key_H, Qt.NoModifier): self.flip_horizontal,
+            (Qt.Key_V, Qt.NoModifier): self.flip_vertical,
+            (Qt.Key_A, Qt.NoModifier): self.arrange_selected,
+            (Qt.Key_T, Qt.NoModifier): self.new_note_at_mouse,
+            (Qt.Key_A, Qt.ControlModifier): self.select_all,
+            (Qt.Key_C, Qt.ControlModifier): self.copy_selected,
+            (Qt.Key_D, Qt.ControlModifier): self.duplicate_selected,
+            # Stacking order: Ctrl+] / Ctrl+[ = all the way, ] / [ = one step.
             (Qt.Key_BracketRight, Qt.ControlModifier): self.bring_to_front,
             (Qt.Key_BracketLeft, Qt.ControlModifier): self.send_to_back,
             (Qt.Key_BracketRight, Qt.NoModifier): self.raise_selected,
             (Qt.Key_BracketLeft, Qt.NoModifier): self.lower_selected,
         }
-        action = stacking.get((event.key(), event.modifiers()))
+        action = actions.get((event.key(), event.modifiers()))
         if action is not None:
             action()
             return
@@ -494,10 +691,10 @@ class Canvas(QGraphicsView):
     # ---- Handles: find which one (if any) is under the mouse ---------------
 
     def handle_at(self, pos, ctrl=False):
-        """Is `pos` (window pixels) on a handle of a selected image?
+        """Is `pos` (window pixels) on a handle of a selected image or note?
 
         Returns (item, mode, edges) or None. `mode` is one of:
-          "crop"   - on an edge or corner, in crop mode or with Ctrl held;
+          "crop"   - on an image's edge or corner, in crop mode or with Ctrl held;
                      `edges` says which edges move, e.g. {"left", "top"}
           "scale"  - on a corner
           "rotate" - just outside a corner
@@ -511,7 +708,7 @@ class Canvas(QGraphicsView):
         for item in candidates:
             corners = [QPointF(self.mapFromScene(item.mapToScene(c))) for c in item.corners()]
 
-            if item is self.crop_item or ctrl:
+            if item is self.crop_item or (ctrl and isinstance(item, ImageItem)):
                 edges = self.crop_edges_at(point, corners)
                 if edges is not None:
                     return item, "crop", edges
@@ -571,6 +768,9 @@ class Canvas(QGraphicsView):
             return
 
         if event.button() == Qt.LeftButton:
+            # Clicking outside the note you're typing in stops typing.
+            if self.editing_note is not None and self.itemAt(pos) is not self.editing_note:
+                self.finish_editing()
             ctrl = bool(event.modifiers() & Qt.ControlModifier)
             hit = self.handle_at(pos, ctrl)
             # Clicking away from the image being cropped finishes cropping.
@@ -600,13 +800,18 @@ class Canvas(QGraphicsView):
                     item.set_cropping(True)
                 return
 
-            if not isinstance(self.itemAt(pos), ImageItem):
+            under_mouse = self.itemAt(pos)
+            if not isinstance(under_mouse, BoardItem):
                 # Empty canvas: start a selection box. Ctrl adds to the
                 # current selection instead of starting over.
                 if not ctrl:
                     self.scene().clearSelection()
                 self._box = {"start": pos, "end": pos, "kept": set(self.scene().selectedItems())}
                 return
+            # On an image or note: Qt will drag the selection around, and we
+            # snap it to the other things on the board. (Not on the note
+            # you're typing in: there, dragging selects text.)
+            self._moving = under_mouse is not self.editing_note
 
         super().mousePressEvent(event)
 
@@ -628,7 +833,7 @@ class Canvas(QGraphicsView):
             # Select every image the box touches, plus the ones kept from before.
             box_on_canvas = self.mapToScene(self.box_rect())
             touched = set(self.scene().items(box_on_canvas, Qt.IntersectsItemShape))
-            for item in self.images():
+            for item in self.board_items():
                 item.setSelected(item in touched or item in self._box["kept"])
             self.viewport().update()
             return
@@ -664,7 +869,68 @@ class Canvas(QGraphicsView):
             else:
                 self.viewport().setCursor(Qt.CrossCursor)
 
-        super().mouseMoveEvent(event)
+        super().mouseMoveEvent(event)  # Qt moves the dragged images here
+
+        if self._moving and event.buttons() & Qt.LeftButton:
+            # Hold Shift to move freely, without snapping.
+            self.snap_selection(free=bool(event.modifiers() & Qt.ShiftModifier))
+
+    # ---- Snapping: line up with other images while dragging -----------------
+
+    def snap_selection(self, free):
+        """Nudge the dragged images so their edges or middle line up with a
+        nearby image's edges or middle, and remember guide lines to draw.
+
+        Qt places dragged images from where the drag started plus how far
+        the mouse moved, so our nudge doesn't add up from move to move.
+        """
+        self._guides = []
+        moving = self.selected_items()
+        others = [item.scene_rect() for item in self.board_items() if not item.isSelected()]
+        if moving and others and not free:
+            box = functools.reduce(QRectF.united, (item.scene_rect() for item in moving))
+            reach = SNAP_DISTANCE / self.zoom_level()  # screen pixels -> canvas units
+
+            def lines_x(r):
+                return (r.left(), r.center().x(), r.right())
+
+            def lines_y(r):
+                return (r.top(), r.center().y(), r.bottom())
+
+            dx = self.closest_snap(lines_x(box), [x for r in others for x in lines_x(r)], reach)
+            dy = self.closest_snap(lines_y(box), [y for r in others for y in lines_y(r)], reach)
+            for item in moving:
+                item.moveBy(dx or 0, dy or 0)
+            box.translate(dx or 0, dy or 0)
+
+            # A guide line for every edge or middle that now lines up (to
+            # within half a screen pixel), long enough to reach from the
+            # dragged images to the other image.
+            tolerance = 0.5 / self.zoom_level()
+            for r in others:
+                if dx is not None:
+                    for x in lines_x(r):
+                        if any(abs(x - mine) < tolerance for mine in lines_x(box)):
+                            top, bottom = min(r.top(), box.top()), max(r.bottom(), box.bottom())
+                            self._guides.append(QLineF(x, top, x, bottom))
+                if dy is not None:
+                    for y in lines_y(r):
+                        if any(abs(y - mine) < tolerance for mine in lines_y(box)):
+                            left, right = min(r.left(), box.left()), max(r.right(), box.right())
+                            self._guides.append(QLineF(left, y, right, y))
+        self.viewport().update()
+
+    @staticmethod
+    def closest_snap(mine, theirs, reach):
+        """The smallest shift (within `reach`) that puts one of `mine` exactly
+        on one of `theirs`, or None if nothing is close enough."""
+        best = None
+        for a in mine:
+            for b in theirs:
+                shift = b - a
+                if abs(shift) <= reach and (best is None or abs(shift) < abs(best)):
+                    best = shift
+        return best
 
     def drag_crop_edges(self, item, edges, start, scene_pos):
         """Move the grabbed crop edges to the mouse.
@@ -706,6 +972,8 @@ class Canvas(QGraphicsView):
             self.viewport().update()  # make the box disappear
             return
         if event.button() == Qt.LeftButton:
+            self._moving = False
+            self._guides = []  # the snap guides disappear with the next repaint
             if self._handle_drag is not None:
                 item = self._handle_drag["item"]
                 if self._handle_drag["mode"] == "crop" and item is not self.crop_item:
@@ -728,16 +996,21 @@ class Canvas(QGraphicsView):
         # Right-clicking an image that isn't selected selects just that one,
         # like in a file manager. On a selected image, the selection stays.
         item = self.itemAt(event.pos())
-        if isinstance(item, ImageItem) and not item.isSelected():
+        if isinstance(item, BoardItem) and item is not self.editing_note and not item.isSelected():
             self.scene().clearSelection()
             item.setSelected(True)
         show_context_menu(self, event.globalPos(), self.mapToScene(event.pos()))
 
     def mouseDoubleClickEvent(self, event):
-        # Double-click an image to bring it to the front.
         item = self.itemAt(event.position().toPoint())
+        # Double-click a note to type in it. (In the note you're already
+        # typing in, Qt's double-click selects a word instead.)
+        if event.button() == Qt.LeftButton and isinstance(item, NoteItem) and item is not self.editing_note:
+            self.start_editing(item, self.snapshot())
+            return
+        # Double-click an image to bring it to the front.
         if event.button() == Qt.LeftButton and isinstance(item, ImageItem):
-            order = self.images()
+            order = self.board_items()
             order.remove(item)
             self.restack(order + [item])
             return
@@ -750,7 +1023,12 @@ class Canvas(QGraphicsView):
         return QRect(self._box["start"], self._box["end"]).normalized()
 
     def drawForeground(self, painter, rect):
-        """Painted on top of the images: the selection box, while dragging one."""
+        """Painted on top of the images: snap guides and the selection box, while dragging."""
+        if self._guides:
+            pen = QPen(SNAP_GUIDE_COLOR, 1)
+            pen.setCosmetic(True)  # 1 screen pixel wide at any zoom
+            painter.setPen(pen)
+            painter.drawLines(self._guides)
         if self._box is None:
             return
         painter.save()

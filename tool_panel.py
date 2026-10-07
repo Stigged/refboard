@@ -4,6 +4,8 @@ The icons are drawn with lines in code (no image files), on a 20 x 20 grid,
 so they match the rest of the look and stay sharp at any screen scaling.
 """
 
+import math
+
 from PySide6.QtCore import QEvent, QPointF, QRectF, Qt
 from PySide6.QtGui import QColor, QPainter, QPainterPath, QPen, QTransform
 from PySide6.QtWidgets import QGraphicsDropShadowEffect, QToolTip, QWidget
@@ -54,6 +56,43 @@ def icon_straighten():
     path.moveTo(7, 8.5)
     path.lineTo(10, 5.5)
     path.lineTo(13, 8.5)
+    return path
+
+
+def icon_flip_horizontal():
+    # Two triangles, mirror images of each other, either side of a dotted line.
+    path = QPainterPath()
+    path.moveTo(8, 4)
+    path.lineTo(8, 16)
+    path.lineTo(2, 16)
+    path.closeSubpath()
+    path.moveTo(12, 4)
+    path.lineTo(12, 16)
+    path.lineTo(18, 16)
+    path.closeSubpath()
+    for y in range(2, 20, 4):
+        path.moveTo(10, y)
+        path.lineTo(10, y + 1)
+    return path
+
+
+def icon_flip_vertical():
+    # The same, turned a quarter turn.
+    turn = QTransform().translate(ICON_SIZE, 0).rotate(90)
+    return turn.map(icon_flip_horizontal())
+
+
+def icon_grayscale():
+    # A circle, half of it shaded with lines: "color off".
+    path = QPainterPath()
+    path.addEllipse(QRectF(2, 2, 16, 16))
+    path.moveTo(10, 2)
+    path.lineTo(10, 18)
+    for y in (5.5, 8.5, 11.5, 14.5):
+        # Stop each line just inside the circle (radius 8, centre 10, 10).
+        x = 10 + math.sqrt(8**2 - (y - 10) ** 2) - 1.5
+        path.moveTo(10, y)
+        path.lineTo(x, y)
     return path
 
 
@@ -133,13 +172,18 @@ class ToolPanel(QWidget):
         # The buttons, in groups. Each one is:
         # (icon, tooltip, what to call, "can it do anything now?", "is it switched on?")
         never = lambda: False
+        has_images = lambda: bool(canvas.selected_images())
         self.groups = [
             [
                 (icon_crop(), "Crop  (C)", canvas.toggle_crop,
-                 lambda: self.has_selection() or canvas.crop_item is not None,
+                 lambda: has_images() or canvas.crop_item is not None,
                  lambda: canvas.crop_item is not None),
                 (icon_straighten(), "Straighten (north up)", canvas.straighten_selected,
                  canvas.any_selected_rotated, never),
+                (icon_flip_horizontal(), "Flip horizontally  (H)", canvas.flip_horizontal, has_images, never),
+                (icon_flip_vertical(), "Flip vertically  (V)", canvas.flip_vertical, has_images, never),
+                (icon_grayscale(), "Black and white  (G)", canvas.toggle_grayscale,
+                 has_images, canvas.selected_all_gray),
                 (icon_delete(), "Delete  (Del)", canvas.delete_selected, self.has_selection, never),
             ],
             [
@@ -153,7 +197,7 @@ class ToolPanel(QWidget):
                 (icon_redo(), "Redo  (Ctrl+Shift+Z)", canvas.redo, canvas.can_redo, never),
             ],
             [
-                (icon_fit(), "Fit all images  (F)", canvas.fit_all, lambda: bool(canvas.images()), never),
+                (icon_fit(), "Fit all  (F)", canvas.fit_all, lambda: bool(canvas.board_items()), never),
             ],
         ]
         self.hovered = None  # (group, number) of the button under the mouse

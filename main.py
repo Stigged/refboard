@@ -1,12 +1,14 @@
 """Start refboard. Run with:  .venv/bin/python main.py  [optional: a .refboard file]"""
 
 import sys
+from datetime import datetime
 from pathlib import Path
 
-from PySide6.QtCore import Qt
+from PySide6.QtCore import Qt, QTimer
 from PySide6.QtGui import QAction, QKeySequence
 from PySide6.QtWidgets import QApplication, QFileDialog, QMainWindow, QMessageBox
 
+from backup import backup_path, left_behind, remove_backup
 from board_file import FILE_EXTENSION, BoardFileError, load_board, read_preview, save_board
 from canvas import Canvas
 from recent import add_recent_board, recent_boards, remove_recent_board
@@ -17,6 +19,7 @@ FILE_FILTER = f"refboard boards (*{FILE_EXTENSION})"
 # Once the start panel is closed, the window may get this small.
 SMALLEST_WINDOW_WIDTH = 200
 SMALLEST_WINDOW_HEIGHT = 150
+BACKUP_SECONDS = 30  # after a change, a crash backup is written within this many seconds
 
 
 class MainWindow(QMainWindow):
@@ -34,6 +37,15 @@ class MainWindow(QMainWindow):
         # Connect the canvas's "changed" signal to our method: every time the
         # board changes, Qt calls self.mark_unsaved for us.
         self.canvas.changed.connect(self.mark_unsaved)
+
+        # Crash backups (see backup.py). The first change starts a 30 second
+        # countdown; when it runs out, the board is backed up. Changes during
+        # the countdown don't restart it, so you never lose more than that.
+        self.backup_timer = QTimer(self)
+        self.backup_timer.setSingleShot(True)
+        self.backup_timer.setInterval(BACKUP_SECONDS * 1000)
+        self.backup_timer.timeout.connect(self.write_backup)
+        self.canvas.changed.connect(self.schedule_backup)
 
         # The tool panel on the left edge; hidden while the start panel shows.
         self.tool_panel = ToolPanel(self.canvas)
@@ -84,6 +96,12 @@ class MainWindow(QMainWindow):
     def mark_unsaved(self):
         self.setWindowModified(True)
 
+    def mark_saved(self):
+        """The board matches its file (or is a fresh empty one): no backup needed."""
+        self.setWindowModified(False)
+        self.backup_timer.stop()
+        remove_backup()
+
     def ok_to_lose_changes(self):
         """Ask what to do with unsaved changes. Returns False if the user cancels."""
         if not self.isWindowModified():
@@ -101,6 +119,7 @@ class MainWindow(QMainWindow):
     def closeEvent(self, event):
         # Qt calls this when the window is about to close. ignore() = stay open.
         if self.ok_to_lose_changes():
+            remove_backup()  # closing normally: nothing to recover next time
             event.accept()
         else:
             event.ignore()
@@ -112,7 +131,7 @@ class MainWindow(QMainWindow):
             return
         self.canvas.clear_board()
         self.path = None
-        self.setWindowModified(False)
+        self.mark_saved()
         self.update_title()
         self.close_start_panel()
 
@@ -137,7 +156,7 @@ class MainWindow(QMainWindow):
             self.refresh_recent()
             return
         self.path = path
-        self.setWindowModified(False)
+        self.mark_saved()
         self.update_title()
         self.close_start_panel()
         add_recent_board(path)
@@ -151,7 +170,7 @@ class MainWindow(QMainWindow):
         except OSError as error:
             QMessageBox.warning(self, "Couldn't save board", str(error))
             return False
-        self.setWindowModified(False)
+        self.mark_saved()
         add_recent_board(self.path)
         return True
 
@@ -165,6 +184,57 @@ class MainWindow(QMainWindow):
         self.update_title()
         return self.save()
 
+    # ---- Crash backups -----------------------------------------------------
+
+    def schedule_backup(self):
+        if not self.backup_timer.isActive():
+            self.backup_timer.start()
+
+    def write_backup(self):
+        if not self.isWindowModified():
+            return  # saved in the meantime: the real file is up to date
+        try:
+            # No preview picture: it isn't needed, and skipping it is quicker.
+            save_board(backup_path(), self.canvas, extra={"original_path": self.path}, preview=False)
+        except OSError:
+            pass  # a failed backup shouldn't interrupt your work; we'll try again next time
+
+    def offer_recovery(self):
+        """If refboard crashed last time, offer to bring the board back.
+        Returns True if a board was restored."""
+        backups = left_behind()
+        if not backups:
+            return False
+        path = backups[0]  # the newest; any older ones are offered next time
+        when = datetime.fromtimestamp(path.stat().st_mtime).strftime("%Y-%m-%d %H:%M")
+        box = QMessageBox(self)
+        box.setWindowTitle("Restore board?")
+        box.setText("refboard didn't close properly last time.")
+        box.setInformativeText(f"A backup of your board from {when} was found. Restore it?")
+        restore = box.addButton("Restore", QMessageBox.AcceptRole)
+        box.addButton("Discard", QMessageBox.DestructiveRole)
+        box.setDefaultButton(restore)
+        box.exec()
+
+        if box.clickedButton() is not restore:
+            remove_backup(path)
+            return False
+        try:
+            board = load_board(path, self.canvas)
+        except BoardFileError as error:
+            QMessageBox.warning(self, "Couldn't restore board", str(error))
+            remove_backup(path)
+            return False
+        # Back to how it was: same file name in the title, still unsaved.
+        self.path = board.get("original_path")
+        self.update_title()
+        self.close_start_panel()
+        self.setWindowModified(True)
+        # Our own backup replaces the old one, so a second crash loses nothing either.
+        self.write_backup()
+        remove_backup(path)
+        return True
+
 
 def main():
     app = QApplication(sys.argv)
@@ -172,8 +242,9 @@ def main():
 
     window = MainWindow()
     window.show()
-    # Started as "main.py some_board.refboard"? Then open that board.
-    if len(sys.argv) > 1:
+    # Crashed last time? Offer the backup first. Otherwise, if started as
+    # "main.py some_board.refboard", open that board.
+    if not window.offer_recovery() and len(sys.argv) > 1:
         window.open_path(sys.argv[1])
 
     sys.exit(app.exec())

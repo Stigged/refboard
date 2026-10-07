@@ -1,17 +1,10 @@
 """One image on the canvas, plus the handles you use to scale, rotate and crop it."""
 
-import math
-
 from PySide6.QtCore import QBuffer, QIODevice, QPointF, QRect, QRectF, Qt
-from PySide6.QtGui import QColor, QPen, QPixmap
+from PySide6.QtGui import QImage, QPainter, QPen, QPixmap
 from PySide6.QtWidgets import QGraphicsItem, QGraphicsPixmapItem, QStyle
 
-# Look and feel of the selection box and its corner handles.
-ACCENT_COLOR = QColor("#0A84FF")  # Apple "systemBlue" (dark mode)
-HANDLE_FILL = QColor("#FFFFFF")
-HANDLE_SIZE = 8  # corner squares, in screen pixels (stay the same size at any zoom)
-HANDLE_GRAB = 8  # how close (screen pixels) the mouse must be to grab a corner
-ROTATE_GRAB = 28  # just outside a corner, up to this distance, you rotate instead
+from board_item import HANDLE_FILL, BoardItem, screen_pixel
 
 # Crop mode.
 CROP_GHOST_OPACITY = 0.25  # how visible the cut-off parts are while cropping
@@ -21,8 +14,24 @@ CROP_LINE_WIDTH = 3
 MIN_CROP_SIZE = 8  # an image can't be cropped smaller than this, in image pixels
 
 
-class ImageItem(QGraphicsPixmapItem):
-    """A picture that can be selected, moved, scaled, rotated and cropped.
+def to_grayscale(image):
+    """A black-and-white copy of a QImage. See-through parts stay see-through."""
+    gray = image.convertToFormat(QImage.Format_Grayscale8)
+    gray = gray.convertToFormat(QImage.Format_ARGB32_Premultiplied)
+    if image.hasAlphaChannel():
+        # Grayscale8 has no see-through information, so copy it back from
+        # the original: "DestinationIn" keeps the gray pixels only as much
+        # as the original pixel was visible.
+        painter = QPainter(gray)
+        painter.setCompositionMode(QPainter.CompositionMode_DestinationIn)
+        painter.drawImage(0, 0, image)
+        painter.end()
+    return gray
+
+
+class ImageItem(BoardItem, QGraphicsPixmapItem):
+    """A picture that can be selected, moved, scaled, rotated, cropped,
+    flipped and shown in black and white.
 
     Scaling and rotating always happen around the middle of the visible
     (cropped) part, so the image stays where it is while it changes.
@@ -31,16 +40,26 @@ class ImageItem(QGraphicsPixmapItem):
     show the part inside `self.crop`. The item's own coordinates are always
     the full picture's pixel coordinates, so (0, 0) is the full picture's
     top-left corner even when that corner is cropped off.
+
+    Flipping and grayscale work on the pixels: `full_pixmap` is the full
+    picture *as shown* (mirrored and/or gray), and the crop is measured on
+    that. The untouched original stays in `source_pixmap`.
     """
 
     def __init__(self, image, data=None, extension="png"):
-        """`data` is the original file's bytes, if the image came from a file.
+        """`image` is a QImage or QPixmap. `data` is the original file's bytes,
+        if the image came from a file.
 
         We keep them so saving a board stores the image exactly as it was
         (a JPG stays a small JPG) instead of re-encoding it.
         """
-        super().__init__(QPixmap.fromImage(image))
-        self.full_pixmap = self.pixmap()
+        pixmap = image if isinstance(image, QPixmap) else QPixmap.fromImage(image)
+        super().__init__(pixmap)
+        self.source_pixmap = pixmap  # the picture as it came in
+        self.full_pixmap = pixmap  # the full picture as shown (flipped / gray)
+        self.flipped_h = False  # mirrored left-right
+        self.flipped_v = False  # mirrored top-bottom
+        self.grayscale = False
         self.crop = self.full_pixmap.rect()  # the visible part, in full-picture pixels
         self.cropping = False  # True while in crop mode (shows the ghost and brackets)
         self.data = data
@@ -57,10 +76,82 @@ class ImageItem(QGraphicsPixmapItem):
             # Pasted images have no original file, so turn them into a PNG once.
             buffer = QBuffer()
             buffer.open(QIODevice.WriteOnly)
-            self.full_pixmap.save(buffer, "PNG")
+            self.source_pixmap.save(buffer, "PNG")
             self.data = bytes(buffer.data())
             self.extension = "png"
         return self.data, self.extension
+
+    # ---- Undo, duplicate ---------------------------------------------------
+
+    def state(self):
+        """Everything undo needs to put this image back exactly as it is now."""
+        return (
+            QRect(self.crop), self.pos(), self.scale(), self.rotation(), self.zValue(),
+            self.flipped_h, self.flipped_v, self.grayscale,
+        )
+
+    def set_state(self, state):
+        crop, pos, scale, rotation, z, flipped_h, flipped_v, grayscale = state
+        self.set_look(flipped_h, flipped_v, grayscale)  # first: the crop is measured on the result
+        self.set_crop(crop)  # before setPos: set_crop nudges the position itself
+        self.setPos(pos)
+        self.setScale(scale)
+        self.setRotation(rotation)
+        self.setZValue(z)
+
+    def clone(self):
+        """A new, identical image (not on the board yet)."""
+        data, extension = self.file_data()  # so both copies share the same file bytes
+        copy = ImageItem(self.source_pixmap, data, extension)
+        copy.set_state(self.state())
+        return copy
+
+    # ---- Flip and grayscale ------------------------------------------------
+
+    def set_look(self, flipped_h, flipped_v, grayscale):
+        """Rebuild the shown picture from the original, if anything changed."""
+        if (flipped_h, flipped_v, grayscale) == (self.flipped_h, self.flipped_v, self.grayscale):
+            return  # nothing to do (and rebuilding big pictures is slow)
+        self.flipped_h, self.flipped_v, self.grayscale = flipped_h, flipped_v, grayscale
+
+        image = self.source_pixmap.toImage()
+        directions = Qt.Orientation(0)
+        if flipped_h:
+            directions |= Qt.Horizontal
+        if flipped_v:
+            directions |= Qt.Vertical
+        if directions:
+            image = image.flipped(directions)
+        if grayscale:
+            image = to_grayscale(image)
+        self.full_pixmap = QPixmap.fromImage(image)
+        self.setPixmap(self.full_pixmap.copy(self.crop))
+        self.update()
+
+    def set_grayscale(self, grayscale):
+        self.set_look(self.flipped_h, self.flipped_v, grayscale)
+
+    def flip(self, horizontal):
+        """Mirror the image as you see it on screen, left-right or top-bottom.
+
+        Three things change together:
+        - the pixels are mirrored,
+        - the crop is mirrored too, so the same part stays visible,
+        - the rotation turns the other way (a picture tilted 10 degrees to
+          the right is tilted 10 degrees to the left in a mirror).
+        Then the image is moved back so its middle stays put.
+        """
+        center = self.center_in_scene()
+        c, full = self.crop, self.full_pixmap.rect()
+        if horizontal:
+            crop = QRect(full.width() - c.x() - c.width(), c.y(), c.width(), c.height())
+            self.set_look(not self.flipped_h, self.flipped_v, self.grayscale)
+        else:
+            crop = QRect(c.x(), full.height() - c.y() - c.height(), c.width(), c.height())
+            self.set_look(self.flipped_h, not self.flipped_v, self.grayscale)
+        self.set_crop(crop)
+        self.setRotation(-self.rotation() % 360)
+        self.setPos(self.pos() + center - self.center_in_scene())
 
     # ---- Cropping ----------------------------------------------------------
 
@@ -93,20 +184,9 @@ class ImageItem(QGraphicsPixmapItem):
             return QRectF(self.full_pixmap.rect())
         return super().boundingRect()
 
-    # ---- Geometry helpers --------------------------------------------------
-
     def local_rect(self):
         """The visible (cropped) part, in the item's own units (before scaling/rotating)."""
         return QRectF(self.crop)
-
-    def corners(self):
-        """The four corners of the visible part: top-left, top-right, bottom-right, bottom-left."""
-        r = self.local_rect()
-        return [r.topLeft(), r.topRight(), r.bottomRight(), r.bottomLeft()]
-
-    def center_in_scene(self):
-        """Where the image's middle is on the canvas."""
-        return self.mapToScene(self.local_rect().center())
 
     # ---- Drawing -----------------------------------------------------------
 
@@ -122,27 +202,10 @@ class ImageItem(QGraphicsPixmapItem):
 
         super().paint(painter, option, widget)
 
-        # The painter is zoomed and scaled along with the image. Work out how
-        # big one screen pixel is in image units, so handles stay a fixed size.
-        t = painter.worldTransform()
-        pixel = 1 / math.hypot(t.m11(), t.m12())
-
         if self.cropping:
-            self.paint_crop_handles(painter, pixel)
+            self.paint_crop_handles(painter, screen_pixel(painter))
         elif self.isSelected():
-            self.paint_selection(painter, pixel)
-
-    def paint_selection(self, painter, pixel):
-        outline = QPen(ACCENT_COLOR, 1.5)
-        outline.setCosmetic(True)  # line width in screen pixels, not image units
-        painter.setPen(outline)
-        painter.setBrush(Qt.NoBrush)
-        painter.drawRect(self.local_rect())
-
-        painter.setBrush(HANDLE_FILL)
-        half = HANDLE_SIZE / 2 * pixel
-        for corner in self.corners():
-            painter.drawRect(QRectF(corner - QPointF(half, half), corner + QPointF(half, half)))
+            self.paint_selection(painter)
 
     def paint_crop_handles(self, painter, pixel):
         r = self.local_rect()
