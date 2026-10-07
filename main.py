@@ -11,6 +11,7 @@ from board_file import FILE_EXTENSION, BoardFileError, load_board, read_preview,
 from canvas import Canvas
 from recent import add_recent_board, recent_boards, remove_recent_board
 from start_panel import MIN_WINDOW_HEIGHT, MIN_WINDOW_WIDTH, StartPanel
+from tool_panel import ToolPanel
 
 FILE_FILTER = f"refboard boards (*{FILE_EXTENSION})"
 # Once the start panel is closed, the window may get this small.
@@ -34,6 +35,10 @@ class MainWindow(QMainWindow):
         # board changes, Qt calls self.mark_unsaved for us.
         self.canvas.changed.connect(self.mark_unsaved)
 
+        # The tool panel on the left edge; hidden while the start panel shows.
+        self.tool_panel = ToolPanel(self.canvas)
+        self.tool_panel.hide()
+
         # The recent-boards panel floats over the canvas until you start working.
         self.start_panel = StartPanel(self.canvas)
         self.canvas.changed.connect(self.close_start_panel)
@@ -54,6 +59,7 @@ class MainWindow(QMainWindow):
         """Hide the start panel and let the window shrink again (handy for a
         small reference window in a screen corner)."""
         self.start_panel.hide()
+        self.tool_panel.show()
         self.setMinimumSize(SMALLEST_WINDOW_WIDTH, SMALLEST_WINDOW_HEIGHT)
         self.canvas.setFocus()  # give the keyboard back to the canvas
 

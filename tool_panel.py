@@ -1,0 +1,256 @@
+"""The tool panel: a slim vertical card on the left edge with icon buttons.
+
+The icons are drawn with lines in code (no image files), on a 20 x 20 grid,
+so they match the rest of the look and stay sharp at any screen scaling.
+"""
+
+from PySide6.QtCore import QEvent, QPointF, QRectF, Qt
+from PySide6.QtGui import QColor, QPainter, QPainterPath, QPen, QTransform
+from PySide6.QtWidgets import QGraphicsDropShadowEffect, QToolTip, QWidget
+
+from shapes import squircle_path
+
+# Colors (same Apple dark-mode grays as the start panel).
+PANEL_COLOR = QColor("#2C2C2E")  # one shade lighter than the canvas
+BORDER_COLOR = QColor("#3A3A3C")
+HOVER_COLOR = QColor("#3A3A3C")
+ACTIVE_COLOR = QColor("#0A84FF")  # a tool that's switched on, like crop mode
+ICON_COLOR = QColor("#E5E5EA")
+DISABLED_ICON_COLOR = QColor("#5A5A5E")  # nothing to do right now
+
+# Sizes, in pixels.
+EDGE_MARGIN = 16  # distance from the window's edge
+PADDING = 8  # inside the panel, around the buttons
+BUTTON_SIZE = 36
+BUTTON_GAP = 4
+GROUP_GAP = 13  # extra room between groups, with a thin line in it
+PANEL_RADIUS = 16
+BUTTON_RADIUS = 10
+ICON_SIZE = 20  # the icons are drawn on a 20 x 20 grid
+ICON_LINE_WIDTH = 1.6
+
+
+# ---- Icons -------------------------------------------------------------------
+# Each function returns a QPainterPath on the 20 x 20 grid.
+
+
+def icon_crop():
+    path = QPainterPath()
+    path.moveTo(5, 1)
+    path.lineTo(5, 15)
+    path.lineTo(19, 15)
+    path.moveTo(1, 5)
+    path.lineTo(15, 5)
+    path.lineTo(15, 19)
+    return path
+
+
+def icon_delete():
+    # A bin: lid, handle and a slightly narrowing body.
+    path = QPainterPath()
+    path.moveTo(3, 5)
+    path.lineTo(17, 5)
+    path.moveTo(8, 5)
+    path.lineTo(8, 2.5)
+    path.lineTo(12, 2.5)
+    path.lineTo(12, 5)
+    path.moveTo(5, 5)
+    path.lineTo(6, 18)
+    path.lineTo(14, 18)
+    path.lineTo(15, 5)
+    return path
+
+
+def icon_undo():
+    # An arrowhead pointing left, and a line that curls back round.
+    path = QPainterPath()
+    path.moveTo(7, 4)
+    path.lineTo(3, 8)
+    path.lineTo(7, 12)
+    path.moveTo(3, 8)
+    path.lineTo(12, 8)
+    # Half a circle, from its top (90 degrees) clockwise to its bottom.
+    path.arcTo(QRectF(7.5, 8, 9, 9), 90, -180)
+    path.lineTo(8, 17)
+    return path
+
+
+def icon_redo():
+    # Undo, mirrored left-to-right: flip x (scale by -1), then shift it back
+    # into the 20 x 20 box.
+    mirror = QTransform().translate(ICON_SIZE, 0).scale(-1, 1)
+    return mirror.map(icon_undo())
+
+
+def icon_fit():
+    # Four corner brackets pointing outwards: "show everything".
+    path = QPainterPath()
+    for (x, y, dx, dy) in [(2, 2, 1, 1), (18, 2, -1, 1), (18, 18, -1, -1), (2, 18, 1, -1)]:
+        path.moveTo(x, y + dy * 5)
+        path.lineTo(x, y)
+        path.lineTo(x + dx * 5, y)
+    return path
+
+
+class ToolPanel(QWidget):
+    """Floats on the left edge of its parent (the canvas), vertically centred."""
+
+    def __init__(self, canvas):
+        super().__init__(canvas)
+        self.canvas = canvas
+
+        # The buttons, in groups. Each one is:
+        # (icon, tooltip, what to call, "can it do anything now?", "is it switched on?")
+        never = lambda: False
+        self.groups = [
+            [
+                (icon_crop(), "Crop  (C)", canvas.toggle_crop,
+                 lambda: self.has_selection() or canvas.crop_item is not None,
+                 lambda: canvas.crop_item is not None),
+                (icon_delete(), "Delete  (Del)", canvas.delete_selected, self.has_selection, never),
+            ],
+            [
+                (icon_undo(), "Undo  (Ctrl+Z)", canvas.undo, canvas.can_undo, never),
+                (icon_redo(), "Redo  (Ctrl+Shift+Z)", canvas.redo, canvas.can_redo, never),
+            ],
+            [
+                (icon_fit(), "Fit all images  (F)", canvas.fit_all, lambda: bool(canvas.images()), never),
+            ],
+        ]
+        self.hovered = None  # (group, number) of the button under the mouse
+
+        # A soft shadow underneath, so the panel looks like it floats.
+        shadow = QGraphicsDropShadowEffect(self)
+        shadow.setBlurRadius(32)
+        shadow.setOffset(0, 8)
+        shadow.setColor(QColor(0, 0, 0, 130))
+        self.setGraphicsEffect(shadow)
+
+        self.setMouseTracking(True)
+        button_count = sum(len(group) for group in self.groups)
+        height = (
+            PADDING * 2
+            + button_count * BUTTON_SIZE
+            + (button_count - len(self.groups)) * BUTTON_GAP
+            + (len(self.groups) - 1) * GROUP_GAP
+        )
+        self.setFixedSize(PADDING * 2 + BUTTON_SIZE, height)
+
+        # Repaint whenever something happens that could dim or light up a button.
+        canvas.scene().selectionChanged.connect(self.update)
+        canvas.changed.connect(self.update)
+        canvas.crop_mode_changed.connect(self.update)
+
+        canvas.installEventFilter(self)
+        self.place()
+
+    def has_selection(self):
+        return bool(self.canvas.scene().selectedItems())
+
+    def place(self):
+        """Left edge, with a margin; vertically centred."""
+        self.move(EDGE_MARGIN, (self.canvas.height() - self.height()) // 2)
+
+    def eventFilter(self, watched, event):
+        if event.type() == QEvent.Resize:
+            self.place()
+        return False  # only looking; the canvas still handles the event
+
+    # ---- Layout --------------------------------------------------------------
+
+    def buttons(self):
+        """Every button with its rectangle: yields ((group, number), rect, button)."""
+        y = PADDING
+        for g, group in enumerate(self.groups):
+            if g > 0:
+                y += GROUP_GAP - BUTTON_GAP
+            for n, button in enumerate(group):
+                yield (g, n), QRectF(PADDING, y, BUTTON_SIZE, BUTTON_SIZE), button
+                y += BUTTON_SIZE + BUTTON_GAP
+
+    def button_at(self, pos):
+        for key, rect, button in self.buttons():
+            if rect.contains(pos):
+                return key, button
+        return None, None
+
+    # ---- Mouse ---------------------------------------------------------------
+
+    def mouseMoveEvent(self, event):
+        key, _button = self.button_at(event.position())
+        if key != self.hovered:
+            self.hovered = key
+            self.update()
+
+    def leaveEvent(self, event):
+        self.hovered = None
+        self.update()
+
+    def mousePressEvent(self, event):
+        event.accept()  # never let clicks fall through to the canvas
+        _key, button = self.button_at(event.position())
+        if event.button() == Qt.LeftButton and button is not None:
+            _icon, _tip, action, enabled, _active = button
+            if enabled():
+                action()
+                self.update()
+
+    def mouseReleaseEvent(self, event):
+        event.accept()
+
+    def mouseDoubleClickEvent(self, event):
+        self.mousePressEvent(event)  # a fast second click counts as another click
+
+    def wheelEvent(self, event):
+        event.accept()
+
+    def event(self, event):
+        # Qt sends a ToolTip event when the mouse rests on us for a moment.
+        if event.type() == QEvent.ToolTip:
+            _key, button = self.button_at(QPointF(event.pos()))
+            if button is not None:
+                QToolTip.showText(event.globalPos(), button[1], self)
+            else:
+                QToolTip.hideText()
+            return True
+        return super().event(event)
+
+    # ---- Drawing -------------------------------------------------------------
+
+    def paintEvent(self, event):
+        painter = QPainter(self)
+        painter.setRenderHint(QPainter.Antialiasing)
+
+        painter.setPen(QPen(BORDER_COLOR, 1))
+        painter.setBrush(PANEL_COLOR)
+        painter.drawPath(squircle_path(QRectF(self.rect()).adjusted(0.5, 0.5, -0.5, -0.5), PANEL_RADIUS))
+
+        previous_group = 0
+        for (g, n), rect, (icon, _tip, _action, enabled, active) in self.buttons():
+            # A thin divider line between groups.
+            if g != previous_group:
+                y = rect.top() - GROUP_GAP / 2 + BUTTON_GAP / 2
+                painter.setPen(QPen(BORDER_COLOR, 1))
+                painter.drawLine(QPointF(PADDING + 6, y), QPointF(PADDING + BUTTON_SIZE - 6, y))
+                previous_group = g
+
+            is_enabled, is_active = enabled(), active()
+            hovered = (g, n) == self.hovered and is_enabled
+
+            # Squircle background: blue when switched on, gray when hovered.
+            if is_active or hovered:
+                painter.setPen(Qt.NoPen)
+                painter.setBrush(ACTIVE_COLOR if is_active else HOVER_COLOR)
+                painter.drawPath(squircle_path(rect, BUTTON_RADIUS))
+
+            # The icon, centred in the button.
+            painter.save()
+            offset = (BUTTON_SIZE - ICON_SIZE) / 2
+            painter.translate(rect.left() + offset, rect.top() + offset)
+            pen = QPen(ICON_COLOR if is_enabled else DISABLED_ICON_COLOR, ICON_LINE_WIDTH)
+            pen.setCapStyle(Qt.RoundCap)
+            pen.setJoinStyle(Qt.RoundJoin)
+            painter.setPen(pen)
+            painter.setBrush(Qt.NoBrush)
+            painter.drawPath(icon)
+            painter.restore()

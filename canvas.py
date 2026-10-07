@@ -26,6 +26,7 @@ STACK_OFFSET = 30  # when adding several images at once, shift each one by this 
 IMAGE_SCALE_STEP = 1.1  # how much one Ctrl+scroll notch scales selected images
 MIN_IMAGE_SCALE = 0.01
 ROTATE_STEP = 15  # degrees per Alt+scroll notch, and the Shift snapping angle
+FIT_MARGIN = 0.05  # "fit all" leaves this much room around the images (5%)
 UNDO_LIMIT = 20  # how many steps Ctrl+Z can go back
 WHEEL_UNDO_PAUSE = 0.6  # seconds; scroll notches closer together than this are one undo step
 
@@ -61,6 +62,7 @@ class Canvas(QGraphicsView):
     # We "emit" it whenever the board changes, so the window can mark
     # itself as having unsaved changes.
     changed = Signal()
+    crop_mode_changed = Signal()  # crop mode switched on or off
 
     def __init__(self):
         super().__init__()
@@ -232,13 +234,21 @@ class Canvas(QGraphicsView):
         self._redo.clear()  # a new change makes the old "future" invalid
         self.changed.emit()
 
+    def can_undo(self):
+        return bool(self._undo)
+
+    def can_redo(self):
+        return bool(self._redo)
+
     def undo(self):
+        self.finish_crop()
         if self._undo:
             self._redo.append(self.snapshot())
             self.restore(self._undo.pop())
             self.changed.emit()
 
     def redo(self):
+        self.finish_crop()
         if self._redo:
             self._undo.append(self.snapshot())
             self.restore(self._redo.pop())
@@ -273,6 +283,7 @@ class Canvas(QGraphicsView):
         self.crop_item = selected[0]
         self._crop_before = self.snapshot()
         self.crop_item.set_cropping(True)
+        self.crop_mode_changed.emit()
 
     def finish_crop(self):
         """Leave crop mode, keeping the crop. The whole session is one undo step."""
@@ -280,6 +291,7 @@ class Canvas(QGraphicsView):
             return
         self.crop_item.set_cropping(False)
         self.crop_item = None
+        self.crop_mode_changed.emit()
         self.save_undo_step(self._crop_before)
 
     def cancel_crop(self):
@@ -288,7 +300,30 @@ class Canvas(QGraphicsView):
             return
         self.crop_item.set_cropping(False)
         self.crop_item = None
+        self.crop_mode_changed.emit()
         self.restore(self._crop_before)
+
+    # ---- Other actions (used by keys and the tool panel) -------------------
+
+    def delete_selected(self):
+        self.finish_crop()
+        before = self.snapshot()
+        for item in self.scene().selectedItems():
+            self.scene().removeItem(item)
+        self.save_undo_step(before)
+
+    def fit_all(self):
+        """Zoom and pan so every image fits in the window."""
+        if not self.images():
+            return
+        area = self.scene().itemsBoundingRect()
+        margin = max(area.width(), area.height()) * FIT_MARGIN
+        area.adjust(-margin, -margin, margin, margin)
+        # fitInView is a ready-made Qt tool: it zooms and centres on `area`.
+        self.fitInView(area, Qt.KeepAspectRatio)
+        # Keep within our usual zoom limits.
+        zoom = max(MIN_ZOOM, min(MAX_ZOOM, self.zoom_level()))
+        self.set_view(zoom, area.center())
 
     def event(self, event):
         # Esc is also a window-wide shortcut (it closes the start panel). Qt
@@ -316,13 +351,11 @@ class Canvas(QGraphicsView):
         if event.key() == Qt.Key_C and event.modifiers() == Qt.NoModifier:
             self.toggle_crop()
             return
-        # Anything else that changes the board finishes cropping first.
-        if self.crop_item is not None and (
-            event.matches(QKeySequence.Paste)
-            or event.matches(QKeySequence.Undo)
-            or event.matches(QKeySequence.Redo)
-            or event.key() == Qt.Key_Delete
-        ):
+        if event.key() == Qt.Key_F and event.modifiers() == Qt.NoModifier:
+            self.fit_all()
+            return
+        # Pasting while cropping finishes the crop first.
+        if self.crop_item is not None and event.matches(QKeySequence.Paste):
             self.finish_crop()
 
         if event.matches(QKeySequence.Paste):
@@ -341,10 +374,7 @@ class Canvas(QGraphicsView):
             return
 
         if event.key() == Qt.Key_Delete:
-            before = self.snapshot()
-            for item in self.scene().selectedItems():
-                self.scene().removeItem(item)
-            self.save_undo_step(before)
+            self.delete_selected()
             return
         super().keyPressEvent(event)
 
