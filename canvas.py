@@ -59,6 +59,10 @@ class Canvas(QGraphicsView):
         self.setFrameShape(QFrame.NoFrame)
         # Zoom toward whatever is under the mouse, not the window centre.
         self.setTransformationAnchor(QGraphicsView.AnchorUnderMouse)
+        # When the window is resized, keep the middle of the view in place
+        # (Qt's default keeps the top-left corner, so dragging the left edge
+        # behaved differently from dragging the right edge).
+        self.setResizeAnchor(QGraphicsView.AnchorViewCenter)
         # Redraw the whole window on every change, so the dot grid never glitches.
         self.setViewportUpdateMode(QGraphicsView.FullViewportUpdate)
         # Allow files and images to be dropped onto the canvas.
