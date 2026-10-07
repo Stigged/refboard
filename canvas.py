@@ -7,10 +7,10 @@ from collections import deque
 from pathlib import Path
 
 from PySide6.QtCore import QEvent, QPoint, QPointF, QRect, QRectF, Qt, Signal
-from PySide6.QtGui import QColor, QCursor, QImage, QKeySequence, QPainter, QPen, QPixmap
+from PySide6.QtGui import QColor, QCursor, QImage, QKeySequence, QPainter, QPalette, QPen, QPixmap
 from PySide6.QtWidgets import QApplication, QFrame, QGraphicsScene, QGraphicsView
 
-from image_item import HANDLE_GRAB, MIN_CROP_SIZE, ROTATE_GRAB, ImageItem
+from image_item import ACCENT_COLOR, HANDLE_GRAB, MIN_CROP_SIZE, ROTATE_GRAB, ImageItem
 
 # Look and feel. Tweak these freely.
 # Colors borrowed from Apple's dark-mode system grays.
@@ -87,6 +87,13 @@ class Canvas(QGraphicsView):
         self.setViewportUpdateMode(QGraphicsView.FullViewportUpdate)
         # Allow files and images to be dropped onto the canvas.
         self.setAcceptDrops(True)
+        # Left-drag on empty canvas draws a selection box; every image it
+        # touches gets selected. Hold Ctrl to add to the current selection.
+        self.setDragMode(QGraphicsView.RubberBandDrag)
+        # The box is drawn in the "highlight" color, so make that our blue.
+        palette = self.palette()
+        palette.setColor(QPalette.Highlight, ACCENT_COLOR)
+        self.setPalette(palette)
 
         # Report mouse movement even with no button held, so the cursor can
         # change when hovering over a scale/rotate handle.
@@ -125,6 +132,9 @@ class Canvas(QGraphicsView):
         """Put a QImage on the canvas, centred on `center` (in canvas units)."""
         item = ImageItem(image, data, extension)
         item.setPos(center - QPointF(image.width() / 2, image.height() / 2))
+        # New images go on top of everything already there.
+        existing = self.images()
+        item.setZValue(existing[-1].zValue() + 1 if existing else 0)
         self.scene().addItem(item)
         return item
 
@@ -202,11 +212,12 @@ class Canvas(QGraphicsView):
     # ---- Undo / redo -------------------------------------------------------
     #
     # Before any change we take a "snapshot": a list of every image with its
-    # crop, position, scale and rotation. Undo puts the previous snapshot back.
+    # crop, position, scale, rotation and stacking height. Undo puts the
+    # previous snapshot back.
 
     def snapshot(self):
         return [
-            (item, QRect(item.crop), item.pos(), item.scale(), item.rotation())
+            (item, QRect(item.crop), item.pos(), item.scale(), item.rotation(), item.zValue())
             for item in self.scene().items()
             if isinstance(item, ImageItem)
         ]
@@ -218,13 +229,14 @@ class Canvas(QGraphicsView):
             if isinstance(item, ImageItem) and item not in wanted:
                 self.scene().removeItem(item)
         # ...bring back ones that were deleted, and reset everyone's position.
-        for item, crop, pos, scale, rotation in snapshot:
+        for item, crop, pos, scale, rotation, z in snapshot:
             if item.scene() is None:
                 self.scene().addItem(item)
             item.set_crop(crop)  # before setPos: set_crop nudges the position itself
             item.setPos(pos)
             item.setScale(scale)
             item.setRotation(rotation)
+            item.setZValue(z)
 
     def save_undo_step(self, before):
         """Call right AFTER a change, with the snapshot from just BEFORE it."""
@@ -312,6 +324,68 @@ class Canvas(QGraphicsView):
             self.scene().removeItem(item)
         self.save_undo_step(before)
 
+    # ---- Stacking order: which image is drawn on top ----------------------
+    #
+    # Every item has a "Z value": higher Z is drawn on top. We keep the
+    # images numbered 0, 1, 2, ... from the bottom up, and reordering just
+    # shuffles the list and hands out the numbers again.
+
+    def restack(self, order):
+        """Give the images in `order` (bottom-most first) Z values 0, 1, 2, ..."""
+        self.finish_crop()
+        before = self.snapshot()
+        for z, item in enumerate(order):
+            item.setZValue(z)
+        self.save_undo_step(before)
+
+    def bring_to_front(self):
+        order = self.images()
+        self.restack([i for i in order if not i.isSelected()] + [i for i in order if i.isSelected()])
+
+    def send_to_back(self):
+        order = self.images()
+        self.restack([i for i in order if i.isSelected()] + [i for i in order if not i.isSelected()])
+
+    def raise_selected(self):
+        """Move each selected image up past the next image that overlaps it.
+
+        Images that don't overlap don't count: swapping with an image on the
+        other side of the board would look like nothing happened.
+        """
+        order = self.images()
+        # Top-most first, so the selected images don't leapfrog each other.
+        for item in sorted(self.scene().selectedItems(), key=lambda i: -i.zValue()):
+            here = order.index(item)
+            for above in range(here + 1, len(order)):
+                other = order[above]
+                if not other.isSelected() and item.collidesWithItem(other):
+                    order.insert(above, order.pop(here))  # now sits just above `other`
+                    break
+        self.restack(order)
+
+    def lower_selected(self):
+        """Like raise_selected, but downwards."""
+        order = self.images()
+        for item in sorted(self.scene().selectedItems(), key=lambda i: i.zValue()):
+            here = order.index(item)
+            for below in range(here - 1, -1, -1):
+                other = order[below]
+                if not other.isSelected() and item.collidesWithItem(other):
+                    order.insert(below, order.pop(here))  # now sits just below `other`
+                    break
+        self.restack(order)
+
+    def straighten_selected(self):
+        """Turn the selected images back to 0 degrees ("north up")."""
+        self.finish_crop()
+        before = self.snapshot()
+        for item in self.scene().selectedItems():
+            item.setRotation(0)
+        self.save_undo_step(before)
+
+    def any_selected_rotated(self):
+        return any(item.rotation() != 0 for item in self.scene().selectedItems())
+
     def fit_all(self):
         """Zoom and pan so every image fits in the window."""
         if not self.images():
@@ -375,6 +449,18 @@ class Canvas(QGraphicsView):
 
         if event.key() == Qt.Key_Delete:
             self.delete_selected()
+            return
+
+        # Stacking order: Ctrl+] / Ctrl+[ = all the way, ] / [ = one step.
+        stacking = {
+            (Qt.Key_BracketRight, Qt.ControlModifier): self.bring_to_front,
+            (Qt.Key_BracketLeft, Qt.ControlModifier): self.send_to_back,
+            (Qt.Key_BracketRight, Qt.NoModifier): self.raise_selected,
+            (Qt.Key_BracketLeft, Qt.NoModifier): self.lower_selected,
+        }
+        action = stacking.get((event.key(), event.modifiers()))
+        if action is not None:
+            action()
             return
         super().keyPressEvent(event)
 
@@ -617,12 +703,12 @@ class Canvas(QGraphicsView):
         super().mouseReleaseEvent(event)
 
     def mouseDoubleClickEvent(self, event):
-        # Double-click an image to straighten it (rotation back to 0, "north up").
+        # Double-click an image to bring it to the front.
         item = self.itemAt(event.position().toPoint())
         if event.button() == Qt.LeftButton and isinstance(item, ImageItem):
-            before = self.snapshot()
-            item.setRotation(0)
-            self.save_undo_step(before)
+            order = self.images()
+            order.remove(item)
+            self.restack(order + [item])
             return
         super().mouseDoubleClickEvent(event)
 

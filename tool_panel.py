@@ -45,6 +45,18 @@ def icon_crop():
     return path
 
 
+def icon_straighten():
+    # A compass: a circle with an arrow pointing north.
+    path = QPainterPath()
+    path.addEllipse(QRectF(2, 2, 16, 16))
+    path.moveTo(10, 14.5)
+    path.lineTo(10, 5.5)
+    path.moveTo(7, 8.5)
+    path.lineTo(10, 5.5)
+    path.lineTo(13, 8.5)
+    return path
+
+
 def icon_delete():
     # A bin: lid, handle and a slightly narrowing body.
     path = QPainterPath()
@@ -92,6 +104,25 @@ def icon_fit():
     return path
 
 
+def icon_bring_to_front():
+    # An arrow pointing up at a line: "all the way to the top".
+    path = QPainterPath()
+    path.moveTo(4, 3)
+    path.lineTo(16, 3)
+    path.moveTo(10, 17)
+    path.lineTo(10, 7)
+    path.moveTo(6, 11)
+    path.lineTo(10, 7)
+    path.lineTo(14, 11)
+    return path
+
+
+def icon_send_to_back():
+    # The same, flipped upside down.
+    flip = QTransform().translate(0, ICON_SIZE).scale(1, -1)
+    return flip.map(icon_bring_to_front())
+
+
 class ToolPanel(QWidget):
     """Floats on the left edge of its parent (the canvas), vertically centred."""
 
@@ -107,7 +138,15 @@ class ToolPanel(QWidget):
                 (icon_crop(), "Crop  (C)", canvas.toggle_crop,
                  lambda: self.has_selection() or canvas.crop_item is not None,
                  lambda: canvas.crop_item is not None),
+                (icon_straighten(), "Straighten (north up)", canvas.straighten_selected,
+                 canvas.any_selected_rotated, never),
                 (icon_delete(), "Delete  (Del)", canvas.delete_selected, self.has_selection, never),
+            ],
+            [
+                (icon_bring_to_front(), "Bring to front  (Ctrl+]   one step: ])",
+                 canvas.bring_to_front, self.has_selection, never),
+                (icon_send_to_back(), "Send to back  (Ctrl+[   one step: [)",
+                 canvas.send_to_back, self.has_selection, never),
             ],
             [
                 (icon_undo(), "Undo  (Ctrl+Z)", canvas.undo, canvas.can_undo, never),
