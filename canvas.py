@@ -7,16 +7,18 @@ from collections import deque
 from pathlib import Path
 
 from PySide6.QtCore import QEvent, QPoint, QPointF, QRect, QRectF, Qt, Signal
-from PySide6.QtGui import QColor, QCursor, QImage, QKeySequence, QPainter, QPalette, QPen, QPixmap
+from PySide6.QtGui import QColor, QCursor, QImage, QKeySequence, QPainter, QPen, QPixmap
 from PySide6.QtWidgets import QApplication, QFrame, QGraphicsScene, QGraphicsView
 
 from context_menu import show_context_menu
-from image_item import ACCENT_COLOR, HANDLE_GRAB, MIN_CROP_SIZE, ROTATE_GRAB, ImageItem
+from image_item import HANDLE_GRAB, MIN_CROP_SIZE, ROTATE_GRAB, ImageItem
 
 # Look and feel. Tweak these freely.
 # Colors borrowed from Apple's dark-mode system grays.
 BACKGROUND_COLOR = QColor("#1C1C1E")  # Apple "systemGray6"
 DOT_COLOR = QColor("#3A3A3C")  # Apple "systemGray4"
+SELECTION_BOX_FILL = QColor(255, 255, 255, 20)  # light gray, very see-through (alpha 0-255)
+SELECTION_BOX_BORDER = QColor(255, 255, 255, 60)
 DOT_SPACING = 50  # distance between grid dots, in canvas units
 ZOOM_STEP = 1.15  # how much one scroll-wheel notch zooms
 MIN_ZOOM = 0.02
@@ -88,13 +90,6 @@ class Canvas(QGraphicsView):
         self.setViewportUpdateMode(QGraphicsView.FullViewportUpdate)
         # Allow files and images to be dropped onto the canvas.
         self.setAcceptDrops(True)
-        # Left-drag on empty canvas draws a selection box; every image it
-        # touches gets selected. Hold Ctrl to add to the current selection.
-        self.setDragMode(QGraphicsView.RubberBandDrag)
-        # The box is drawn in the "highlight" color, so make that our blue.
-        palette = self.palette()
-        palette.setColor(QPalette.Highlight, ACCENT_COLOR)
-        self.setPalette(palette)
 
         # Report mouse movement even with no button held, so the cursor can
         # change when hovering over a scale/rotate handle.
@@ -102,6 +97,7 @@ class Canvas(QGraphicsView):
 
         self._pan_last_pos = None  # set while the middle mouse button is held
         self._handle_drag = None  # set while dragging a scale/rotate/crop handle
+        self._box = None  # set while dragging a selection box on empty canvas
         self.crop_item = None  # the image in crop mode, if any
         self._crop_before = None  # snapshot from when crop mode started, for undo/cancel
 
@@ -604,6 +600,14 @@ class Canvas(QGraphicsView):
                     item.set_cropping(True)
                 return
 
+            if not isinstance(self.itemAt(pos), ImageItem):
+                # Empty canvas: start a selection box. Ctrl adds to the
+                # current selection instead of starting over.
+                if not ctrl:
+                    self.scene().clearSelection()
+                self._box = {"start": pos, "end": pos, "kept": set(self.scene().selectedItems())}
+                return
+
         super().mousePressEvent(event)
 
     def mouseMoveEvent(self, event):
@@ -617,6 +621,16 @@ class Canvas(QGraphicsView):
             v = self.verticalScrollBar()
             h.setValue(h.value() - delta.x())
             v.setValue(v.value() - delta.y())
+            return
+
+        if self._box is not None:
+            self._box["end"] = pos
+            # Select every image the box touches, plus the ones kept from before.
+            box_on_canvas = self.mapToScene(self.box_rect())
+            touched = set(self.scene().items(box_on_canvas, Qt.IntersectsItemShape))
+            for item in self.images():
+                item.setSelected(item in touched or item in self._box["kept"])
+            self.viewport().update()
             return
 
         if self._handle_drag is not None:
@@ -687,6 +701,10 @@ class Canvas(QGraphicsView):
             self._pan_last_pos = None
             self.viewport().unsetCursor()
             return
+        if event.button() == Qt.LeftButton and self._box is not None:
+            self._box = None
+            self.viewport().update()  # make the box disappear
+            return
         if event.button() == Qt.LeftButton:
             if self._handle_drag is not None:
                 item = self._handle_drag["item"]
@@ -724,6 +742,23 @@ class Canvas(QGraphicsView):
             self.restack(order + [item])
             return
         super().mouseDoubleClickEvent(event)
+
+    # ---- Selection box -----------------------------------------------------
+
+    def box_rect(self):
+        """The selection box in window pixels. normalized() makes dragging up or left work too."""
+        return QRect(self._box["start"], self._box["end"]).normalized()
+
+    def drawForeground(self, painter, rect):
+        """Painted on top of the images: the selection box, while dragging one."""
+        if self._box is None:
+            return
+        painter.save()
+        painter.resetTransform()  # draw in window pixels, not canvas units
+        painter.setPen(QPen(SELECTION_BOX_BORDER, 1))
+        painter.setBrush(SELECTION_BOX_FILL)
+        painter.drawRect(self.box_rect())
+        painter.restore()
 
     # ---- Background --------------------------------------------------------
 
