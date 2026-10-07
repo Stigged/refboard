@@ -7,8 +7,9 @@ from PySide6.QtCore import Qt
 from PySide6.QtGui import QAction, QKeySequence
 from PySide6.QtWidgets import QApplication, QFileDialog, QMainWindow, QMessageBox
 
-from board_file import FILE_EXTENSION, BoardFileError, load_board, save_board
+from board_file import FILE_EXTENSION, BoardFileError, load_board, read_preview, save_board
 from canvas import Canvas
+from recent import add_recent_board, recent_boards, remove_recent_board
 from start_panel import MIN_WINDOW_HEIGHT, MIN_WINDOW_WIDTH, StartPanel
 
 FILE_FILTER = f"refboard boards (*{FILE_EXTENSION})"
@@ -38,6 +39,8 @@ class MainWindow(QMainWindow):
         self.canvas.changed.connect(self.close_start_panel)
         self.start_panel.new_board_requested.connect(self.new_board)
         self.start_panel.open_requested.connect(self.open)
+        self.start_panel.open_path_requested.connect(self.open_recent)
+        self.refresh_recent()
 
         self.add_shortcut(QKeySequence.New, self.new_board)  # Ctrl+N
         self.add_shortcut(QKeySequence.Save, self.save)  # Ctrl+S
@@ -53,6 +56,10 @@ class MainWindow(QMainWindow):
         self.start_panel.hide()
         self.setMinimumSize(SMALLEST_WINDOW_WIDTH, SMALLEST_WINDOW_HEIGHT)
         self.canvas.setFocus()  # give the keyboard back to the canvas
+
+    def refresh_recent(self):
+        """Give the start panel the current list of recent boards, with previews."""
+        self.start_panel.set_recent([(path, read_preview(path)) for path in recent_boards()])
 
     def add_shortcut(self, keys, method):
         """Run `method` when `keys` are pressed anywhere in the window."""
@@ -110,16 +117,24 @@ class MainWindow(QMainWindow):
         if path:
             self.open_path(path)
 
+    def open_recent(self, path):
+        if self.ok_to_lose_changes():
+            self.open_path(path)
+
     def open_path(self, path):
         try:
             load_board(path, self.canvas)
         except BoardFileError as error:
             QMessageBox.warning(self, "Couldn't open board", str(error))
+            # Broken or gone? Then it shouldn't stay in the recent list.
+            remove_recent_board(path)
+            self.refresh_recent()
             return
         self.path = path
         self.setWindowModified(False)
         self.update_title()
         self.close_start_panel()
+        add_recent_board(path)
 
     def save(self):
         """Save to the current file (or ask for one). Returns True if it was saved."""
@@ -131,6 +146,7 @@ class MainWindow(QMainWindow):
             QMessageBox.warning(self, "Couldn't save board", str(error))
             return False
         self.setWindowModified(False)
+        add_recent_board(self.path)
         return True
 
     def save_as(self):

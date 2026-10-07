@@ -2,6 +2,7 @@
 
 A .refboard file is really a zip archive (you can open it with Ark). Inside:
     board.json       where every image is, how big, how turned, plus the view
+    preview.jpg      a small picture of the board, for the start panel
     images/0.jpg     the pictures themselves, in their original format
     images/1.png
     ...
@@ -11,11 +12,12 @@ import json
 import os
 import zipfile
 
-from PySide6.QtCore import QPointF
+from PySide6.QtCore import QBuffer, QIODevice, QPointF
 from PySide6.QtGui import QImage
 
 FILE_EXTENSION = ".refboard"
 FORMAT_VERSION = 1  # bump this if the layout of board.json ever changes
+PREVIEW_NAME = "preview.jpg"
 
 
 class BoardFileError(Exception):
@@ -49,6 +51,12 @@ def save_board(path, canvas):
                 }
             )
         archive.writestr("board.json", json.dumps(board, indent=2))
+
+        # Turn the preview picture into JPG bytes and store it too.
+        buffer = QBuffer()
+        buffer.open(QIODevice.WriteOnly)
+        canvas.render_preview().save(buffer, "JPG", 85)
+        archive.writestr(PREVIEW_NAME, bytes(buffer.data()))
     os.replace(temp_path, path)
 
 
@@ -76,3 +84,13 @@ def load_board(path, canvas):
                 canvas.set_view(view["zoom"], QPointF(view["x"], view["y"]))
     except (OSError, zipfile.BadZipFile, KeyError, ValueError) as error:
         raise BoardFileError(f"Couldn't open this board:\n{error}") from error
+
+
+def read_preview(path):
+    """The preview picture inside a board file, or None if it has none (or can't be read)."""
+    try:
+        with zipfile.ZipFile(path) as archive:
+            image = QImage.fromData(archive.read(PREVIEW_NAME))
+    except (OSError, zipfile.BadZipFile, KeyError):
+        return None
+    return None if image.isNull() else image

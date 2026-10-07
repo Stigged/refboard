@@ -6,7 +6,7 @@ from collections import deque
 
 from pathlib import Path
 
-from PySide6.QtCore import QPoint, QPointF, Qt, Signal
+from PySide6.QtCore import QPoint, QPointF, QRectF, Qt, Signal
 from PySide6.QtGui import QColor, QCursor, QImage, QKeySequence, QPainter, QPen, QPixmap
 from PySide6.QtWidgets import QApplication, QFrame, QGraphicsScene, QGraphicsView
 
@@ -20,6 +20,8 @@ DOT_SPACING = 50  # distance between grid dots, in canvas units
 ZOOM_STEP = 1.15  # how much one scroll-wheel notch zooms
 MIN_ZOOM = 0.02
 MAX_ZOOM = 50
+PREVIEW_WIDTH = 640  # size of the little picture saved inside each board file
+PREVIEW_HEIGHT = 400
 STACK_OFFSET = 30  # when adding several images at once, shift each one by this much
 IMAGE_SCALE_STEP = 1.1  # how much one Ctrl+scroll notch scales selected images
 MIN_IMAGE_SCALE = 0.01
@@ -105,6 +107,30 @@ class Canvas(QGraphicsView):
         item.setPos(center - QPointF(image.width() / 2, image.height() / 2))
         self.scene().addItem(item)
         return item
+
+    def render_preview(self):
+        """A small picture of the whole board, for the start panel's tiles."""
+        image = QImage(PREVIEW_WIDTH, PREVIEW_HEIGHT, QImage.Format_RGB32)
+        image.fill(BACKGROUND_COLOR)
+        if not self.images():
+            return image
+
+        # The area that holds every image, plus a 5% margin around it.
+        source = self.scene().itemsBoundingRect()
+        margin = max(source.width(), source.height()) * 0.05
+        source.adjust(-margin, -margin, margin, margin)
+
+        # Hide the selection (blue outline and handles) while we take the picture.
+        selected = self.scene().selectedItems()
+        self.scene().clearSelection()
+        painter = QPainter(image)
+        painter.setRenderHints(QPainter.Antialiasing | QPainter.SmoothPixmapTransform)
+        # render() squeezes `source` into the picture, keeping its shape.
+        self.scene().render(painter, QRectF(image.rect()), source)
+        painter.end()
+        for item in selected:
+            item.setSelected(True)
+        return image
 
     def images(self):
         """All images on the board, bottom-most first."""
