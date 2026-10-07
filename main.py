@@ -3,11 +3,13 @@
 import sys
 from pathlib import Path
 
+from PySide6.QtCore import Qt
 from PySide6.QtGui import QAction, QKeySequence
 from PySide6.QtWidgets import QApplication, QFileDialog, QMainWindow, QMessageBox
 
 from board_file import FILE_EXTENSION, BoardFileError, load_board, save_board
 from canvas import Canvas
+from start_panel import StartPanel
 
 FILE_FILTER = f"refboard boards (*{FILE_EXTENSION})"
 
@@ -26,9 +28,14 @@ class MainWindow(QMainWindow):
         # board changes, Qt calls self.mark_unsaved for us.
         self.canvas.changed.connect(self.mark_unsaved)
 
+        # The recent-boards panel floats over the canvas until you start working.
+        self.start_panel = StartPanel(self.canvas)
+        self.canvas.changed.connect(self.start_panel.hide)
+
         self.add_shortcut(QKeySequence.Save, self.save)  # Ctrl+S
         self.add_shortcut(QKeySequence.SaveAs, self.save_as)  # Ctrl+Shift+S
         self.add_shortcut(QKeySequence.Open, self.open)  # Ctrl+O
+        self.add_shortcut(QKeySequence(Qt.Key_Escape), self.start_panel.hide)
 
         self.update_title()
 
@@ -88,6 +95,7 @@ class MainWindow(QMainWindow):
         self.path = path
         self.setWindowModified(False)
         self.update_title()
+        self.start_panel.hide()
 
     def save(self):
         """Save to the current file (or ask for one). Returns True if it was saved."""
