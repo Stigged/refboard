@@ -12,7 +12,7 @@ import json
 import os
 import zipfile
 
-from PySide6.QtCore import QBuffer, QIODevice, QPointF
+from PySide6.QtCore import QBuffer, QIODevice, QPointF, QRect
 from PySide6.QtGui import QImage
 
 FILE_EXTENSION = ".refboard"
@@ -44,6 +44,7 @@ def save_board(path, canvas):
             images.append(
                 {
                     "file": name,
+                    "crop": [item.crop.x(), item.crop.y(), item.crop.width(), item.crop.height()],
                     "x": item.pos().x(),
                     "y": item.pos().y(),
                     "scale": item.scale(),
@@ -75,6 +76,8 @@ def load_board(path, canvas):
                     continue  # skip a damaged picture instead of failing the whole board
                 extension = entry["file"].rsplit(".", 1)[-1]
                 item = canvas.add_image(image, QPointF(0, 0), data, extension)
+                if "crop" in entry:  # boards saved before cropping existed have none
+                    item.set_crop(QRect(*entry["crop"]))
                 item.setPos(entry["x"], entry["y"])
                 item.setScale(entry["scale"])
                 item.setRotation(entry["rotation"])

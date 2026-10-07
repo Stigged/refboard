@@ -6,11 +6,11 @@ from collections import deque
 
 from pathlib import Path
 
-from PySide6.QtCore import QPoint, QPointF, QRectF, Qt, Signal
+from PySide6.QtCore import QEvent, QPoint, QPointF, QRect, QRectF, Qt, Signal
 from PySide6.QtGui import QColor, QCursor, QImage, QKeySequence, QPainter, QPen, QPixmap
 from PySide6.QtWidgets import QApplication, QFrame, QGraphicsScene, QGraphicsView
 
-from image_item import HANDLE_GRAB, ROTATE_GRAB, ImageItem
+from image_item import HANDLE_GRAB, MIN_CROP_SIZE, ROTATE_GRAB, ImageItem
 
 # Look and feel. Tweak these freely.
 # Colors borrowed from Apple's dark-mode system grays.
@@ -32,6 +32,22 @@ WHEEL_UNDO_PAUSE = 0.6  # seconds; scroll notches closer together than this are 
 # Qt needs the canvas to have *some* size. A million units in every
 # direction is big enough that you'll never reach the edge.
 CANVAS_SIZE = 1_000_000
+
+# Which crop edges each corner moves, in the order ImageItem.corners() gives them.
+CORNER_EDGES = [{"left", "top"}, {"right", "top"}, {"right", "bottom"}, {"left", "bottom"}]
+# Each side, as (name, first corner, second corner).
+SIDES = [("top", 0, 1), ("right", 1, 2), ("bottom", 2, 3), ("left", 3, 0)]
+
+
+def distance_to_segment(p, a, b):
+    """Shortest distance from point p to the line piece from a to b."""
+    ab, ap = b - a, p - a
+    length_squared = ab.x() ** 2 + ab.y() ** 2
+    # How far along a->b the closest point is: 0 = at a, 1 = at b.
+    t = 0.0 if length_squared == 0 else (ap.x() * ab.x() + ap.y() * ab.y()) / length_squared
+    t = max(0.0, min(1.0, t))
+    closest = a + ab * t
+    return math.hypot(p.x() - closest.x(), p.y() - closest.y())
 
 
 class Canvas(QGraphicsView):
@@ -75,7 +91,9 @@ class Canvas(QGraphicsView):
         self.viewport().setMouseTracking(True)
 
         self._pan_last_pos = None  # set while the middle mouse button is held
-        self._handle_drag = None  # set while dragging a scale/rotate handle
+        self._handle_drag = None  # set while dragging a scale/rotate/crop handle
+        self.crop_item = None  # the image in crop mode, if any
+        self._crop_before = None  # snapshot from when crop mode started, for undo/cancel
 
         # Undo history. A deque with maxlen forgets the oldest entry by itself
         # once it's full, so we never keep more than UNDO_LIMIT steps.
@@ -138,6 +156,7 @@ class Canvas(QGraphicsView):
 
     def clear_board(self):
         """Remove every image and forget the undo history (used when opening a file)."""
+        self.crop_item = None
         for item in self.images():
             self.scene().removeItem(item)
         self._undo.clear()
@@ -181,11 +200,11 @@ class Canvas(QGraphicsView):
     # ---- Undo / redo -------------------------------------------------------
     #
     # Before any change we take a "snapshot": a list of every image with its
-    # position, scale and rotation. Undo puts the previous snapshot back.
+    # crop, position, scale and rotation. Undo puts the previous snapshot back.
 
     def snapshot(self):
         return [
-            (item, item.pos(), item.scale(), item.rotation())
+            (item, QRect(item.crop), item.pos(), item.scale(), item.rotation())
             for item in self.scene().items()
             if isinstance(item, ImageItem)
         ]
@@ -197,9 +216,10 @@ class Canvas(QGraphicsView):
             if isinstance(item, ImageItem) and item not in wanted:
                 self.scene().removeItem(item)
         # ...bring back ones that were deleted, and reset everyone's position.
-        for item, pos, scale, rotation in snapshot:
+        for item, crop, pos, scale, rotation in snapshot:
             if item.scene() is None:
                 self.scene().addItem(item)
+            item.set_crop(crop)  # before setPos: set_crop nudges the position itself
             item.setPos(pos)
             item.setScale(scale)
             item.setRotation(rotation)
@@ -240,9 +260,71 @@ class Canvas(QGraphicsView):
         if self.add_images_from_mime(event.mimeData(), center):
             event.acceptProposedAction()
 
-    # ---- Paste (Ctrl+V) Delete ---------------------------------------------
+    # ---- Crop mode ---------------------------------------------------------
+
+    def toggle_crop(self):
+        """Start cropping the selected image, or finish if already cropping."""
+        if self.crop_item is not None:
+            self.finish_crop()
+            return
+        selected = self.scene().selectedItems()
+        if not selected:
+            return
+        self.crop_item = selected[0]
+        self._crop_before = self.snapshot()
+        self.crop_item.set_cropping(True)
+
+    def finish_crop(self):
+        """Leave crop mode, keeping the crop. The whole session is one undo step."""
+        if self.crop_item is None:
+            return
+        self.crop_item.set_cropping(False)
+        self.crop_item = None
+        self.save_undo_step(self._crop_before)
+
+    def cancel_crop(self):
+        """Leave crop mode and put everything back how it was."""
+        if self.crop_item is None:
+            return
+        self.crop_item.set_cropping(False)
+        self.crop_item = None
+        self.restore(self._crop_before)
+
+    def event(self, event):
+        # Esc is also a window-wide shortcut (it closes the start panel). Qt
+        # asks the focused widget first with a "ShortcutOverride" event;
+        # while cropping, we say "this key is mine" so Esc cancels the crop.
+        if (
+            event.type() == QEvent.ShortcutOverride
+            and self.crop_item is not None
+            and event.key() == Qt.Key_Escape
+        ):
+            event.accept()
+            return True
+        return super().event(event)
+
+    # ---- Keyboard ----------------------------------------------------------
 
     def keyPressEvent(self, event):
+        if self.crop_item is not None:
+            if event.key() in (Qt.Key_Return, Qt.Key_Enter):
+                self.finish_crop()
+                return
+            if event.key() == Qt.Key_Escape:
+                self.cancel_crop()
+                return
+        if event.key() == Qt.Key_C and event.modifiers() == Qt.NoModifier:
+            self.toggle_crop()
+            return
+        # Anything else that changes the board finishes cropping first.
+        if self.crop_item is not None and (
+            event.matches(QKeySequence.Paste)
+            or event.matches(QKeySequence.Undo)
+            or event.matches(QKeySequence.Redo)
+            or event.key() == Qt.Key_Delete
+        ):
+            self.finish_crop()
+
         if event.matches(QKeySequence.Paste):
             # Paste where the mouse is, or in the middle if it's outside the window.
             mouse = self.viewport().mapFromGlobal(QCursor.pos())
@@ -298,22 +380,49 @@ class Canvas(QGraphicsView):
 
     # ---- Handles: find which one (if any) is under the mouse ---------------
 
-    def handle_at(self, pos):
-        """Is `pos` (window pixels) on a corner handle of a selected image?
+    def handle_at(self, pos, ctrl=False):
+        """Is `pos` (window pixels) on a handle of a selected image?
 
-        Returns (item, "scale") or (item, "rotate"), or None if not.
-        On the corner = scale. Just outside the corner = rotate.
+        Returns (item, mode, edges) or None. `mode` is one of:
+          "crop"   - on an edge or corner, in crop mode or with Ctrl held;
+                     `edges` says which edges move, e.g. {"left", "top"}
+          "scale"  - on a corner
+          "rotate" - just outside a corner
         """
         scene_pos = self.mapToScene(pos)
-        for item in self.scene().selectedItems():
-            for corner in item.corners():
-                corner_on_screen = self.mapFromScene(item.mapToScene(corner))
-                distance = math.dist((pos.x(), pos.y()), (corner_on_screen.x(), corner_on_screen.y()))
+        point = QPointF(pos)
+        candidates = self.scene().selectedItems()
+        if self.crop_item is not None and self.crop_item not in candidates:
+            candidates.insert(0, self.crop_item)
+
+        for item in candidates:
+            corners = [QPointF(self.mapFromScene(item.mapToScene(c))) for c in item.corners()]
+
+            if item is self.crop_item or ctrl:
+                edges = self.crop_edges_at(point, corners)
+                if edges is not None:
+                    return item, "crop", edges
+                if item is self.crop_item:
+                    continue  # no scaling or rotating while in crop mode
+
+            for corner in corners:
+                distance = math.dist((point.x(), point.y()), (corner.x(), corner.y()))
                 if distance <= HANDLE_GRAB:
-                    return item, "scale"
+                    return item, "scale", None
                 outside = not item.contains(item.mapFromScene(scene_pos))
                 if distance <= ROTATE_GRAB and outside:
-                    return item, "rotate"
+                    return item, "rotate", None
+        return None
+
+    def crop_edges_at(self, point, corners):
+        """Which crop edges `point` (screen pixels) grabs, given the image's
+        corners on screen. Corners grab two edges, sides one. None = no edge."""
+        for corner, edges in zip(corners, CORNER_EDGES):
+            if math.dist((point.x(), point.y()), (corner.x(), corner.y())) <= HANDLE_GRAB:
+                return edges
+        for name, a, b in SIDES:
+            if distance_to_segment(point, corners[a], corners[b]) <= HANDLE_GRAB:
+                return {name}
         return None
 
     def angle_from_center(self, item, scene_pos):
@@ -336,23 +445,33 @@ class Canvas(QGraphicsView):
             return
 
         if event.button() == Qt.LeftButton:
-            # Whatever this left-drag does (move, scale, rotate), it becomes
-            # one undo step when the button is released.
+            ctrl = bool(event.modifiers() & Qt.ControlModifier)
+            hit = self.handle_at(pos, ctrl)
+            # Clicking away from the image being cropped finishes cropping.
+            if self.crop_item is not None and hit is None and self.itemAt(pos) is not self.crop_item:
+                self.finish_crop()
+            # Whatever this left-drag does (move, scale, rotate, crop), it
+            # becomes one undo step when the button is released.
             self._before_left_drag = self.snapshot()
-            hit = self.handle_at(pos)
             if hit is not None:
-                item, mode = hit
+                item, mode, edges = hit
                 scene_pos = self.mapToScene(pos)
                 # Remember how things were at the start of the drag; every
                 # mouse move then compares against this starting point.
                 self._handle_drag = {
                     "item": item,
                     "mode": mode,
+                    "edges": edges,
+                    "start_crop": QRectF(item.crop),
                     "start_scale": item.scale(),
                     "start_distance": max(1e-6, self.distance_from_center(item, scene_pos)),
                     "start_rotation": item.rotation(),
                     "start_angle": self.angle_from_center(item, scene_pos),
                 }
+                # Ctrl+drag crop: show the ghost of the cut-off parts while
+                # dragging, just like crop mode does.
+                if mode == "crop":
+                    item.set_cropping(True)
                 return
 
         super().mousePressEvent(event)
@@ -374,7 +493,9 @@ class Canvas(QGraphicsView):
             drag = self._handle_drag
             item = drag["item"]
             scene_pos = self.mapToScene(pos)
-            if drag["mode"] == "scale":
+            if drag["mode"] == "crop":
+                self.drag_crop_edges(item, drag["edges"], drag["start_crop"], scene_pos)
+            elif drag["mode"] == "scale":
                 # Twice as far from the centre as when you grabbed it = twice as big.
                 ratio = self.distance_from_center(item, scene_pos) / drag["start_distance"]
                 item.setScale(max(MIN_IMAGE_SCALE, drag["start_scale"] * ratio))
@@ -389,15 +510,47 @@ class Canvas(QGraphicsView):
 
         # No button held: show a hint cursor when hovering over a handle.
         if event.buttons() == Qt.NoButton:
-            hit = self.handle_at(pos)
+            hit = self.handle_at(pos, bool(event.modifiers() & Qt.ControlModifier))
             if hit is None:
                 self.viewport().unsetCursor()
+            elif hit[1] == "crop":
+                self.viewport().setCursor(self.crop_cursor(hit[2]))
             elif hit[1] == "scale":
                 self.viewport().setCursor(Qt.SizeAllCursor)
             else:
                 self.viewport().setCursor(Qt.CrossCursor)
 
         super().mouseMoveEvent(event)
+
+    def drag_crop_edges(self, item, edges, start, scene_pos):
+        """Move the grabbed crop edges to the mouse.
+
+        mapFromScene turns the mouse position into the image's own pixel
+        coordinates, so this works the same for scaled and rotated images.
+        """
+        mouse = item.mapFromScene(scene_pos)
+        full = QRectF(item.full_pixmap.rect())
+        r = QRectF(start)
+        # Each edge follows the mouse, but stays inside the full picture and
+        # at least MIN_CROP_SIZE away from the opposite edge.
+        if "left" in edges:
+            r.setLeft(max(full.left(), min(mouse.x(), r.right() - MIN_CROP_SIZE)))
+        if "right" in edges:
+            r.setRight(min(full.right(), max(mouse.x(), r.left() + MIN_CROP_SIZE)))
+        if "top" in edges:
+            r.setTop(max(full.top(), min(mouse.y(), r.bottom() - MIN_CROP_SIZE)))
+        if "bottom" in edges:
+            r.setBottom(min(full.bottom(), max(mouse.y(), r.top() + MIN_CROP_SIZE)))
+        item.set_crop(r.toRect())  # toRect rounds to whole pixels
+
+    def crop_cursor(self, edges):
+        if edges in ({"left"}, {"right"}):
+            return Qt.SizeHorCursor
+        if edges in ({"top"}, {"bottom"}):
+            return Qt.SizeVerCursor
+        if edges in ({"left", "top"}, {"right", "bottom"}):
+            return Qt.SizeFDiagCursor
+        return Qt.SizeBDiagCursor
 
     def mouseReleaseEvent(self, event):
         if event.button() == Qt.MiddleButton and self._pan_last_pos is not None:
@@ -406,10 +559,16 @@ class Canvas(QGraphicsView):
             return
         if event.button() == Qt.LeftButton:
             if self._handle_drag is not None:
+                item = self._handle_drag["item"]
+                if self._handle_drag["mode"] == "crop" and item is not self.crop_item:
+                    item.set_cropping(False)  # quick crop done: hide the ghost again
                 self._handle_drag = None
             else:
                 super().mouseReleaseEvent(event)  # let Qt finish moving the images
-            self.save_undo_step(self._before_left_drag)
+            # In crop mode the whole session becomes one undo step when it
+            # ends, so single drags aren't saved separately.
+            if self.crop_item is None:
+                self.save_undo_step(self._before_left_drag)
             self._before_left_drag = None
             return
         super().mouseReleaseEvent(event)
