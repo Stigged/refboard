@@ -444,6 +444,12 @@ class Canvas(QGraphicsView):
             self.viewport().setCursor(Qt.ClosedHandCursor)
             return
 
+        if event.button() == Qt.RightButton:
+            # Nothing uses the right button (yet). Don't pass it on: Qt's
+            # scene treats any click nobody wants as "clicked on empty
+            # space" and clears the selection, even mid-drag.
+            return
+
         if event.button() == Qt.LeftButton:
             ctrl = bool(event.modifiers() & Qt.ControlModifier)
             hit = self.handle_at(pos, ctrl)
