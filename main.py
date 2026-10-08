@@ -31,6 +31,10 @@ class MainWindow(QMainWindow):
         # No title bar or border, like PureRef. WindowFrame (below) gives
         # back what the border did: an outline and resizing from the edges.
         self.setWindowFlag(Qt.FramelessWindowHint)
+        # Let the desktop show through wherever we paint see-through colors
+        # (background opacity, see Canvas). Has to be set before the window
+        # is first shown.
+        self.setAttribute(Qt.WA_TranslucentBackground)
         self.canvas = Canvas()
         self.setCentralWidget(self.canvas)
         self.resize(1000, 700)

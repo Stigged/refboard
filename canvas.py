@@ -9,7 +9,9 @@ from pathlib import Path
 
 from PySide6.QtCore import QEvent, QLineF, QPoint, QPointF, QRect, QRectF, Qt, Signal
 from PySide6.QtGui import QColor, QCursor, QImage, QKeySequence, QPainter, QPen, QPixmap
-from PySide6.QtWidgets import QApplication, QFrame, QGraphicsScene, QGraphicsView
+from PySide6.QtWidgets import (
+    QApplication, QFrame, QGraphicsOpacityEffect, QGraphicsScene, QGraphicsView, QToolTip,
+)
 
 from board_item import HANDLE_GRAB, ROTATE_GRAB, BoardItem
 from context_menu import show_context_menu
@@ -40,6 +42,9 @@ WHEEL_UNDO_PAUSE = 0.6  # seconds; scroll notches closer together than this are 
 DUPLICATE_OFFSET = 20  # Ctrl+D puts the copy this many screen pixels down and right
 ARRANGE_GAP = 10  # space between arranged images, in screen pixels
 SNAP_DISTANCE = 8  # dragged images snap when an edge is this close, in screen pixels
+# Temporary, until the window panel has sliders: O and Shift+O step through these.
+BACKGROUND_OPACITY_STEPS = [1.0, 0.75, 0.5, 0.25, 0.0]
+WINDOW_OPACITY_STEPS = [1.0, 0.8, 0.6, 0.4]
 
 # Qt needs the canvas to have *some* size. A million units in every
 # direction is big enough that you'll never reach the edge.
@@ -103,6 +108,14 @@ class Canvas(QGraphicsView):
         # change when hovering over a scale/rotate handle.
         self.viewport().setMouseTracking(True)
 
+        # See-through: the window lets what's behind it show wherever we
+        # paint with a see-through color (see MainWindow). For that, the
+        # canvas mustn't fill itself with a solid color first; drawBackground
+        # paints the background instead, as see-through as asked.
+        self.viewport().setAutoFillBackground(False)
+        self.background_opacity = 1.0  # 0 = no background at all, only images
+        self.window_opacity = 1.0  # everything, images too
+
         self._pan_last_pos = None  # set while panning (middle button, or Space + left)
         self._pan_button = None  # the mouse button that is panning
         self._space_held = False  # Space down: left-drag pans (for trackpads)
@@ -123,6 +136,50 @@ class Canvas(QGraphicsView):
         self._before_left_drag = None  # snapshot taken when the left button goes down
         self._last_wheel_edit = 0.0  # when Ctrl/Alt+scroll last changed an image
         self.centerOn(0, 0)
+
+    # ---- See-through -------------------------------------------------------
+
+    def set_background_opacity(self, opacity):
+        """How solid the dark background is (0 to 1). Images stay solid."""
+        self.background_opacity = opacity
+        self.viewport().update()
+
+    def set_window_opacity(self, opacity):
+        """How solid everything is (0 to 1), images and panels too.
+
+        Qt has setWindowOpacity for this, but on Wayland apps aren't allowed
+        to fade their own window. So we fade it ourselves: an "opacity
+        effect" draws the canvas (and the panels on it) into a hidden
+        picture first, then puts that on screen as see-through as asked.
+        """
+        self.window_opacity = opacity
+        if opacity >= 1:
+            self.setGraphicsEffect(None)  # fully solid: skip the extra work
+            return
+        effect = self.graphicsEffect()
+        if effect is None:
+            effect = QGraphicsOpacityEffect(self)
+            self.setGraphicsEffect(effect)
+        effect.setOpacity(opacity)
+
+    def next_opacity_step(self, steps, current):
+        """The step after `current` in `steps`, wrapping around to the first."""
+        later = [step for step in steps if step < current - 1e-6]
+        return later[0] if later else steps[0]
+
+    def cycle_background_opacity(self):
+        self.set_background_opacity(self.next_opacity_step(BACKGROUND_OPACITY_STEPS, self.background_opacity))
+        QToolTip.showText(QCursor.pos(), f"Background {round(self.background_opacity * 100)}%", self)
+
+    def cycle_window_opacity(self):
+        self.set_window_opacity(self.next_opacity_step(WINDOW_OPACITY_STEPS, self.window_opacity))
+        QToolTip.showText(QCursor.pos(), f"Window {round(self.window_opacity * 100)}%", self)
+
+    def reset_opacity(self):
+        """Everything fully solid again (Ctrl+Shift+O)."""
+        self.set_background_opacity(1.0)
+        self.set_window_opacity(1.0)
+        QToolTip.showText(QCursor.pos(), "Opacity reset to 100%", self)
 
     def zoom_level(self):
         """1.0 means 100%. m11 is the horizontal scale factor of the view."""
@@ -653,6 +710,9 @@ class Canvas(QGraphicsView):
             (Qt.Key_V, Qt.NoModifier): self.flip_vertical,
             (Qt.Key_A, Qt.NoModifier): self.arrange_selected,
             (Qt.Key_T, Qt.NoModifier): self.new_note_at_mouse,
+            (Qt.Key_O, Qt.NoModifier): self.cycle_background_opacity,
+            (Qt.Key_O, Qt.ShiftModifier): self.cycle_window_opacity,
+            (Qt.Key_O, Qt.ControlModifier | Qt.ShiftModifier): self.reset_opacity,
             (Qt.Key_A, Qt.ControlModifier): self.select_all,
             (Qt.Key_C, Qt.ControlModifier): self.copy_selected,
             (Qt.Key_D, Qt.ControlModifier): self.duplicate_selected,
@@ -1095,8 +1155,13 @@ class Canvas(QGraphicsView):
         """Paint the dark background with a faint dot grid.
 
         `rect` is the part of the canvas that needs painting, in canvas units.
+        Both fade with the background opacity.
         """
-        painter.fillRect(rect, BACKGROUND_COLOR)
+        if self.background_opacity <= 0:
+            return  # nothing at all: only the images show
+        background = QColor(BACKGROUND_COLOR)
+        background.setAlphaF(self.background_opacity)
+        painter.fillRect(rect, background)
 
         # When zoomed far out the dots would crowd together, so spread them
         # out until they're at least 25 screen pixels apart.
@@ -1104,7 +1169,9 @@ class Canvas(QGraphicsView):
         while spacing * self.zoom_level() < 25:
             spacing *= 2
 
-        pen = QPen(DOT_COLOR, 2)
+        dots = QColor(DOT_COLOR)
+        dots.setAlphaF(self.background_opacity)
+        pen = QPen(dots, 2)
         pen.setCosmetic(True)  # 2 screen pixels wide, no matter the zoom
         painter.setPen(pen)
 
