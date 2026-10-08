@@ -8,7 +8,7 @@ from PySide6.QtCore import Qt, QTimer
 from PySide6.QtGui import QAction, QKeySequence
 from PySide6.QtWidgets import QApplication, QFileDialog, QMainWindow, QMessageBox
 
-from backup import backup_path, left_behind, remove_backup
+from backup import backup_path, forget, left_behind, release, remove_backup
 from board_file import FILE_EXTENSION, BoardFileError, load_board, read_preview, save_board
 from canvas import Canvas
 from recent import add_recent_board, recent_boards, remove_recent_board
@@ -119,7 +119,7 @@ class MainWindow(QMainWindow):
     def closeEvent(self, event):
         # Qt calls this when the window is about to close. ignore() = stay open.
         if self.ok_to_lose_changes():
-            remove_backup()  # closing normally: nothing to recover next time
+            release()  # closing normally: nothing to recover next time
             event.accept()
         else:
             event.ignore()
@@ -178,7 +178,8 @@ class MainWindow(QMainWindow):
         path, _ = QFileDialog.getSaveFileName(self, "Save board", "", FILE_FILTER)
         if not path:
             return False  # the user pressed Cancel
-        if not path.endswith(FILE_EXTENSION):
+        # lower(): Windows and macOS treat "Board.REFBOARD" as the same extension.
+        if not path.lower().endswith(FILE_EXTENSION):
             path += FILE_EXTENSION
         self.path = path
         self.update_title()
@@ -205,7 +206,9 @@ class MainWindow(QMainWindow):
         backups = left_behind()
         if not backups:
             return False
-        path = backups[0]  # the newest; any older ones are offered next time
+        path, lock = backups[0]  # the newest
+        for _older, older_lock in backups[1:]:
+            older_lock.unlock()  # leave those for next time
         when = datetime.fromtimestamp(path.stat().st_mtime).strftime("%Y-%m-%d %H:%M")
         box = QMessageBox(self)
         box.setWindowTitle("Restore board?")
@@ -217,13 +220,13 @@ class MainWindow(QMainWindow):
         box.exec()
 
         if box.clickedButton() is not restore:
-            remove_backup(path)
+            forget(path, lock)
             return False
         try:
             board = load_board(path, self.canvas)
         except BoardFileError as error:
             QMessageBox.warning(self, "Couldn't restore board", str(error))
-            remove_backup(path)
+            forget(path, lock)
             return False
         # Back to how it was: same file name in the title, still unsaved.
         self.path = board.get("original_path")
@@ -232,7 +235,7 @@ class MainWindow(QMainWindow):
         self.setWindowModified(True)
         # Our own backup replaces the old one, so a second crash loses nothing either.
         self.write_backup()
-        remove_backup(path)
+        forget(path, lock)
         return True
 
 

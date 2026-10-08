@@ -10,6 +10,7 @@ from PySide6.QtCore import QEvent, QPointF, QRectF, Qt
 from PySide6.QtGui import QColor, QPainter, QPainterPath, QPen, QTransform
 from PySide6.QtWidgets import QGraphicsDropShadowEffect, QToolTip, QWidget
 
+from platform_support import delete_shortcut_text, shortcut_text
 from shapes import squircle_path
 
 # Colors (same Apple dark-mode grays as the start panel).
@@ -184,17 +185,17 @@ class ToolPanel(QWidget):
                 (icon_flip_vertical(), "Flip vertically  (V)", canvas.flip_vertical, has_images, never),
                 (icon_grayscale(), "Black and white  (G)", canvas.toggle_grayscale,
                  has_images, canvas.selected_all_gray),
-                (icon_delete(), "Delete  (Del)", canvas.delete_selected, self.has_selection, never),
+                (icon_delete(), f"Delete  ({delete_shortcut_text()})", canvas.delete_selected, self.has_selection, never),
             ],
             [
-                (icon_bring_to_front(), "Bring to front  (Ctrl+]   one step: ])",
+                (icon_bring_to_front(), f"Bring to front  ({shortcut_text('Ctrl+]')}   one step: ])",
                  canvas.bring_to_front, self.has_selection, never),
-                (icon_send_to_back(), "Send to back  (Ctrl+[   one step: [)",
+                (icon_send_to_back(), f"Send to back  ({shortcut_text('Ctrl+[')}   one step: [)",
                  canvas.send_to_back, self.has_selection, never),
             ],
             [
-                (icon_undo(), "Undo  (Ctrl+Z)", canvas.undo, canvas.can_undo, never),
-                (icon_redo(), "Redo  (Ctrl+Shift+Z)", canvas.redo, canvas.can_redo, never),
+                (icon_undo(), f"Undo  ({shortcut_text('Ctrl+Z')})", canvas.undo, canvas.can_undo, never),
+                (icon_redo(), f"Redo  ({shortcut_text('Ctrl+Shift+Z')})", canvas.redo, canvas.can_redo, never),
             ],
             [
                 (icon_fit(), "Fit all  (F)", canvas.fit_all, lambda: bool(canvas.board_items()), never),

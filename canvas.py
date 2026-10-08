@@ -15,6 +15,7 @@ from board_item import HANDLE_GRAB, ROTATE_GRAB, BoardItem
 from context_menu import show_context_menu
 from image_item import MIN_CROP_SIZE, ImageItem
 from note_item import NoteItem
+from platform_support import is_delete_key, start_window_move
 
 # Look and feel. Tweak these freely.
 # Colors borrowed from Apple's dark-mode system grays.
@@ -103,6 +104,7 @@ class Canvas(QGraphicsView):
         self.viewport().setMouseTracking(True)
 
         self._pan_last_pos = None  # set while the middle mouse button is held
+        self._window_drag = None  # set while moving the window ourselves (see Alt+drag)
         self._handle_drag = None  # set while dragging a scale/rotate/crop handle
         self._box = None  # set while dragging a selection box on empty canvas
         self.crop_item = None  # the image in crop mode, if any
@@ -630,7 +632,7 @@ class Canvas(QGraphicsView):
             self.redo()
             return
 
-        if event.key() == Qt.Key_Delete:
+        if is_delete_key(event.key()):
             self.delete_selected()
             return
 
@@ -761,10 +763,13 @@ class Canvas(QGraphicsView):
             return
 
         if event.button() == Qt.LeftButton and event.modifiers() & Qt.AltModifier:
-            # Alt+drag moves the whole window. startSystemMove hands the drag
-            # to the window manager (KWin), so it feels native: snapping to
-            # screen edges and all. Works on Wayland too.
-            self.window().windowHandle().startSystemMove()
+            # Alt+drag (Option+drag on a Mac) moves the whole window. Normally
+            # the operating system takes over the drag, so it feels native.
+            # If it can't, we move the window ourselves in mouseMoveEvent:
+            # remember where in the window you grabbed it.
+            if not start_window_move(self.window()):
+                grabbed = event.globalPosition().toPoint()
+                self._window_drag = grabbed - self.window().frameGeometry().topLeft()
             return
 
         if event.button() == Qt.LeftButton:
@@ -817,6 +822,10 @@ class Canvas(QGraphicsView):
 
     def mouseMoveEvent(self, event):
         pos = event.position().toPoint()
+
+        if self._window_drag is not None:
+            self.window().move(event.globalPosition().toPoint() - self._window_drag)
+            return
 
         if self._pan_last_pos is not None:
             delta: QPoint = pos - self._pan_last_pos
@@ -966,6 +975,9 @@ class Canvas(QGraphicsView):
         if event.button() == Qt.MiddleButton and self._pan_last_pos is not None:
             self._pan_last_pos = None
             self.viewport().unsetCursor()
+            return
+        if event.button() == Qt.LeftButton and self._window_drag is not None:
+            self._window_drag = None
             return
         if event.button() == Qt.LeftButton and self._box is not None:
             self._box = None

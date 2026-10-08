@@ -7,6 +7,8 @@ matches the dark tool panel instead of the system theme.
 from PySide6.QtCore import Qt
 from PySide6.QtWidgets import QApplication, QMenu
 
+from platform_support import delete_shortcut_text, shortcut_text
+
 # Same Apple dark-mode colors as the tool panel and start panel.
 MENU_STYLE = """
 QMenu {
@@ -56,23 +58,23 @@ def show_context_menu(canvas, global_pos, scene_pos):
         # Text after a tab is shown on the right, as the shortcut hint.
         menu.addAction(text, action).setEnabled(enabled)
 
-    add("Paste here\tCtrl+V", lambda: canvas.add_from_mime(
+    add(f"Paste here\t{shortcut_text('Ctrl+V')}", lambda: canvas.add_from_mime(
         QApplication.clipboard().mimeData(), scene_pos), can_paste)
     add("Add note here\tT", lambda: canvas.new_note_at(scene_pos))
     menu.addSeparator()
-    add("Copy\tCtrl+C", canvas.copy_selected, selected)
-    add("Duplicate\tCtrl+D", canvas.duplicate_selected, selected)
-    add("Select all\tCtrl+A", canvas.select_all, bool(canvas.board_items()))
+    add(f"Copy\t{shortcut_text('Ctrl+C')}", canvas.copy_selected, selected)
+    add(f"Duplicate\t{shortcut_text('Ctrl+D')}", canvas.duplicate_selected, selected)
+    add(f"Select all\t{shortcut_text('Ctrl+A')}", canvas.select_all, bool(canvas.board_items()))
     menu.addSeparator()
-    add("Bring to front\tCtrl+]", canvas.bring_to_front, selected)
-    add("Send to back\tCtrl+[", canvas.send_to_back, selected)
+    add(f"Bring to front\t{shortcut_text('Ctrl+]')}", canvas.bring_to_front, selected)
+    add(f"Send to back\t{shortcut_text('Ctrl+[')}", canvas.send_to_back, selected)
     menu.addSeparator()
     add("Crop\tC", canvas.toggle_crop, images or canvas.crop_item is not None)
     add("Flip horizontally\tH", canvas.flip_horizontal, images)
     add("Flip vertically\tV", canvas.flip_vertical, images)
     add("Color\tG" if canvas.selected_all_gray() else "Black and white\tG", canvas.toggle_grayscale, images)
     add("Straighten", canvas.straighten_selected, canvas.any_selected_rotated())
-    add("Delete\tDel", canvas.delete_selected, selected)
+    add(f"Delete\t{delete_shortcut_text()}", canvas.delete_selected, selected)
     menu.addSeparator()
     add("Arrange in rows\tA", canvas.arrange_selected, len(canvas.selected_items()) > 1)
     add("Fit all\tF", canvas.fit_all, bool(canvas.board_items()))
