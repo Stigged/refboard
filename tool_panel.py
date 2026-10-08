@@ -2,6 +2,10 @@
 
 The icons are drawn with lines in code (no image files), on a 20 x 20 grid,
 so they match the rest of the look and stay sharp at any screen scaling.
+
+ButtonPanel is the card itself (layout, hovering, clicking, drawing). The
+tool panel and the window panel (window_panel.py) each fill one with
+their own buttons.
 """
 
 import math
@@ -163,44 +167,20 @@ def icon_send_to_back():
     return flip.map(icon_bring_to_front())
 
 
-class ToolPanel(QWidget):
-    """Floats on the left edge of its parent (the canvas), vertically centred."""
+class ButtonPanel(QWidget):
+    """A floating card with a row or column of icon buttons, on top of the canvas.
 
-    def __init__(self, canvas):
+    `groups` is a list of button groups (a thin line separates them). Each
+    button is: (icon, tooltip, what to call, "can it do anything now?",
+    "is it switched on?"). The tooltip can also be a function that returns
+    the text, for tooltips that change.
+    """
+
+    def __init__(self, canvas, groups, horizontal=False):
         super().__init__(canvas)
         self.canvas = canvas
-
-        # The buttons, in groups. Each one is:
-        # (icon, tooltip, what to call, "can it do anything now?", "is it switched on?")
-        never = lambda: False
-        has_images = lambda: bool(canvas.selected_images())
-        self.groups = [
-            [
-                (icon_crop(), "Crop  (C)", canvas.toggle_crop,
-                 lambda: has_images() or canvas.crop_item is not None,
-                 lambda: canvas.crop_item is not None),
-                (icon_straighten(), "Straighten (north up)", canvas.straighten_selected,
-                 canvas.any_selected_rotated, never),
-                (icon_flip_horizontal(), "Flip horizontally  (H)", canvas.flip_horizontal, has_images, never),
-                (icon_flip_vertical(), "Flip vertically  (V)", canvas.flip_vertical, has_images, never),
-                (icon_grayscale(), "Black and white  (G)", canvas.toggle_grayscale,
-                 has_images, canvas.selected_all_gray),
-                (icon_delete(), f"Delete  ({delete_shortcut_text()})", canvas.delete_selected, self.has_selection, never),
-            ],
-            [
-                (icon_bring_to_front(), f"Bring to front  ({shortcut_text('Ctrl+]')}   one step: ])",
-                 canvas.bring_to_front, self.has_selection, never),
-                (icon_send_to_back(), f"Send to back  ({shortcut_text('Ctrl+[')}   one step: [)",
-                 canvas.send_to_back, self.has_selection, never),
-            ],
-            [
-                (icon_undo(), f"Undo  ({shortcut_text('Ctrl+Z')})", canvas.undo, canvas.can_undo, never),
-                (icon_redo(), f"Redo  ({shortcut_text('Ctrl+Shift+Z')})", canvas.redo, canvas.can_redo, never),
-            ],
-            [
-                (icon_fit(), "Fit all  (F)", canvas.fit_all, lambda: bool(canvas.board_items()), never),
-            ],
-        ]
+        self.groups = groups
+        self.horizontal = horizontal  # buttons side by side instead of stacked
         self.hovered = None  # (group, number) of the button under the mouse
 
         # A soft shadow underneath, so the panel looks like it floats.
@@ -212,51 +192,46 @@ class ToolPanel(QWidget):
 
         self.setMouseTracking(True)
         button_count = sum(len(group) for group in self.groups)
-        height = (
+        length = (
             PADDING * 2
             + button_count * BUTTON_SIZE
             + (button_count - len(self.groups)) * BUTTON_GAP
             + (len(self.groups) - 1) * GROUP_GAP
         )
-        self.setFixedSize(PADDING * 2 + BUTTON_SIZE, height)
-
-        # Repaint whenever something happens that could dim or light up a button.
-        canvas.scene().selectionChanged.connect(self.update)
-        canvas.changed.connect(self.update)
-        canvas.crop_mode_changed.connect(self.update)
-
-        canvas.installEventFilter(self)
-        self.place()
-
-    def has_selection(self):
-        return bool(self.canvas.scene().selectedItems())
-
-    def place(self):
-        """Left edge, with a margin; vertically centred."""
-        self.move(EDGE_MARGIN, (self.canvas.height() - self.height()) // 2)
-
-    def eventFilter(self, watched, event):
-        if event.type() == QEvent.Resize:
-            self.place()
-        return False  # only looking; the canvas still handles the event
+        thickness = PADDING * 2 + BUTTON_SIZE
+        if horizontal:
+            self.setFixedSize(length, thickness)
+        else:
+            self.setFixedSize(thickness, length)
 
     # ---- Layout --------------------------------------------------------------
 
     def buttons(self):
         """Every button with its rectangle: yields ((group, number), rect, button)."""
-        y = PADDING
+        along = PADDING  # how far along the panel we are (down, or to the right)
         for g, group in enumerate(self.groups):
             if g > 0:
-                y += GROUP_GAP - BUTTON_GAP
+                along += GROUP_GAP - BUTTON_GAP
             for n, button in enumerate(group):
-                yield (g, n), QRectF(PADDING, y, BUTTON_SIZE, BUTTON_SIZE), button
-                y += BUTTON_SIZE + BUTTON_GAP
+                if self.horizontal:
+                    rect = QRectF(along, PADDING, BUTTON_SIZE, BUTTON_SIZE)
+                else:
+                    rect = QRectF(PADDING, along, BUTTON_SIZE, BUTTON_SIZE)
+                yield (g, n), rect, button
+                along += BUTTON_SIZE + BUTTON_GAP
 
     def button_at(self, pos):
         for key, rect, button in self.buttons():
             if rect.contains(pos):
                 return key, button
         return None, None
+
+    def button_rect(self, action):
+        """Where the button that calls `action` is, in panel coordinates."""
+        for _key, rect, button in self.buttons():
+            if button[2] == action:
+                return rect
+        return None
 
     # ---- Mouse ---------------------------------------------------------------
 
@@ -293,7 +268,8 @@ class ToolPanel(QWidget):
         if event.type() == QEvent.ToolTip:
             _key, button = self.button_at(QPointF(event.pos()))
             if button is not None:
-                QToolTip.showText(event.globalPos(), button[1], self)
+                tip = button[1]() if callable(button[1]) else button[1]
+                QToolTip.showText(event.globalPos(), tip, self)
             else:
                 QToolTip.hideText()
             return True
@@ -313,9 +289,13 @@ class ToolPanel(QWidget):
         for (g, n), rect, (icon, _tip, _action, enabled, active) in self.buttons():
             # A thin divider line between groups.
             if g != previous_group:
-                y = rect.top() - GROUP_GAP / 2 + BUTTON_GAP / 2
                 painter.setPen(QPen(BORDER_COLOR, 1))
-                painter.drawLine(QPointF(PADDING + 6, y), QPointF(PADDING + BUTTON_SIZE - 6, y))
+                if self.horizontal:
+                    x = rect.left() - GROUP_GAP / 2 + BUTTON_GAP / 2
+                    painter.drawLine(QPointF(x, PADDING + 6), QPointF(x, PADDING + BUTTON_SIZE - 6))
+                else:
+                    y = rect.top() - GROUP_GAP / 2 + BUTTON_GAP / 2
+                    painter.drawLine(QPointF(PADDING + 6, y), QPointF(PADDING + BUTTON_SIZE - 6, y))
                 previous_group = g
 
             is_enabled, is_active = enabled(), active()
@@ -338,3 +318,59 @@ class ToolPanel(QWidget):
             painter.setBrush(Qt.NoBrush)
             painter.drawPath(icon)
             painter.restore()
+
+
+class ToolPanel(ButtonPanel):
+    """Floats on the left edge of its parent (the canvas), vertically centred."""
+
+    def __init__(self, canvas):
+        # The buttons, in groups. Each one is:
+        # (icon, tooltip, what to call, "can it do anything now?", "is it switched on?")
+        never = lambda: False
+        has_images = lambda: bool(canvas.selected_images())
+        has_selection = lambda: bool(canvas.scene().selectedItems())
+        groups = [
+            [
+                (icon_crop(), "Crop  (C)", canvas.toggle_crop,
+                 lambda: has_images() or canvas.crop_item is not None,
+                 lambda: canvas.crop_item is not None),
+                (icon_straighten(), "Straighten (north up)", canvas.straighten_selected,
+                 canvas.any_selected_rotated, never),
+                (icon_flip_horizontal(), "Flip horizontally  (H)", canvas.flip_horizontal, has_images, never),
+                (icon_flip_vertical(), "Flip vertically  (V)", canvas.flip_vertical, has_images, never),
+                (icon_grayscale(), "Black and white  (G)", canvas.toggle_grayscale,
+                 has_images, canvas.selected_all_gray),
+                (icon_delete(), f"Delete  ({delete_shortcut_text()})", canvas.delete_selected, has_selection, never),
+            ],
+            [
+                (icon_bring_to_front(), f"Bring to front  ({shortcut_text('Ctrl+]')}   one step: ])",
+                 canvas.bring_to_front, has_selection, never),
+                (icon_send_to_back(), f"Send to back  ({shortcut_text('Ctrl+[')}   one step: [)",
+                 canvas.send_to_back, has_selection, never),
+            ],
+            [
+                (icon_undo(), f"Undo  ({shortcut_text('Ctrl+Z')})", canvas.undo, canvas.can_undo, never),
+                (icon_redo(), f"Redo  ({shortcut_text('Ctrl+Shift+Z')})", canvas.redo, canvas.can_redo, never),
+            ],
+            [
+                (icon_fit(), "Fit all  (F)", canvas.fit_all, lambda: bool(canvas.board_items()), never),
+            ],
+        ]
+        super().__init__(canvas, groups)
+
+        # Repaint whenever something happens that could dim or light up a button.
+        canvas.scene().selectionChanged.connect(self.update)
+        canvas.changed.connect(self.update)
+        canvas.crop_mode_changed.connect(self.update)
+
+        canvas.installEventFilter(self)
+        self.place()
+
+    def place(self):
+        """Left edge, with a margin; vertically centred."""
+        self.move(EDGE_MARGIN, (self.canvas.height() - self.height()) // 2)
+
+    def eventFilter(self, watched, event):
+        if event.type() == QEvent.Resize:
+            self.place()
+        return False  # only looking; the canvas still handles the event

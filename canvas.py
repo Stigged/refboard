@@ -79,6 +79,7 @@ class Canvas(QGraphicsView):
     # itself as having unsaved changes.
     changed = Signal()
     crop_mode_changed = Signal()  # crop mode switched on or off
+    opacity_changed = Signal()  # background or window opacity changed
 
     def __init__(self):
         super().__init__()
@@ -143,6 +144,7 @@ class Canvas(QGraphicsView):
         """How solid the dark background is (0 to 1). Images stay solid."""
         self.background_opacity = opacity
         self.viewport().update()
+        self.opacity_changed.emit()
 
     def set_window_opacity(self, opacity):
         """How solid everything is (0 to 1), images and panels too.
@@ -155,12 +157,13 @@ class Canvas(QGraphicsView):
         self.window_opacity = opacity
         if opacity >= 1:
             self.setGraphicsEffect(None)  # fully solid: skip the extra work
-            return
-        effect = self.graphicsEffect()
-        if effect is None:
-            effect = QGraphicsOpacityEffect(self)
-            self.setGraphicsEffect(effect)
-        effect.setOpacity(opacity)
+        else:
+            effect = self.graphicsEffect()
+            if effect is None:
+                effect = QGraphicsOpacityEffect(self)
+                self.setGraphicsEffect(effect)
+            effect.setOpacity(opacity)
+        self.opacity_changed.emit()
 
     def next_opacity_step(self, steps, current):
         """The step after `current` in `steps`, wrapping around to the first."""

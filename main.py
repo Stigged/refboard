@@ -4,23 +4,29 @@ import sys
 from datetime import datetime
 from pathlib import Path
 
-from PySide6.QtCore import Qt, QTimer
-from PySide6.QtGui import QAction, QKeySequence
-from PySide6.QtWidgets import QApplication, QFileDialog, QMainWindow, QMessageBox
+from PySide6.QtCore import QEvent, Qt, QTimer
+from PySide6.QtGui import QAction, QCursor, QKeySequence
+from PySide6.QtWidgets import (
+    QApplication, QFileDialog, QMainWindow, QMessageBox, QSystemTrayIcon, QToolTip,
+)
 
 from backup import backup_path, forget, left_behind, release, remove_backup
 from board_file import FILE_EXTENSION, BoardFileError, load_board, read_preview, save_board
 from canvas import Canvas
+from platform_support import release_always_on_top, set_always_on_top, set_click_through
 from recent import add_recent_board, recent_boards, remove_recent_board
 from start_panel import MIN_WINDOW_HEIGHT, MIN_WINDOW_WIDTH, StartPanel
 from tool_panel import ToolPanel
+from tray_icon import TrayIcon, app_icon
 from window_frame import WindowFrame
+from window_panel import WindowPanel
 
 FILE_FILTER = f"refboard boards (*{FILE_EXTENSION})"
 # Once the start panel is closed, the window may get this small.
 SMALLEST_WINDOW_WIDTH = 200
 SMALLEST_WINDOW_HEIGHT = 150
 BACKUP_SECONDS = 30  # after a change, a crash backup is written within this many seconds
+PANEL_HIDE_SECONDS = 5  # in full overlay mode, the panels disappear after this long
 
 
 class MainWindow(QMainWindow):
@@ -55,9 +61,33 @@ class MainWindow(QMainWindow):
         self.backup_timer.timeout.connect(self.write_backup)
         self.canvas.changed.connect(self.schedule_backup)
 
-        # The tool panel on the left edge; hidden while the start panel shows.
+        # Overlay mode: see toggle_pin and toggle_click_through.
+        self.pinned = False  # kept on top of other windows
+        self.click_through = False  # clicks go to the window behind us
+        self.click_through_armed = False  # see changeEvent
+        self.pinned_for_click_through = False  # we pinned only because of click-through
+
+        # The tool panel on the left edge and the window panel along the
+        # bottom; both hidden while the start panel shows.
         self.tool_panel = ToolPanel(self.canvas)
         self.tool_panel.hide()
+        self.window_panel = WindowPanel(self.canvas, self)
+        self.window_panel.hide()
+
+        # In full overlay mode (see overlay_mode) the panels get out of the
+        # way after a few seconds, so only your images float over the screen.
+        self.panel_hide_timer = QTimer(self)
+        self.panel_hide_timer.setSingleShot(True)
+        self.panel_hide_timer.setInterval(PANEL_HIDE_SECONDS * 1000)
+        self.panel_hide_timer.timeout.connect(self.hide_panels)
+        self.canvas.opacity_changed.connect(self.update_panels)
+
+        # The tray icon: the way back from click-through (see tray_icon.py).
+        # Some desktops have no tray; then Alt+Tab is the only way back.
+        self.tray = None
+        if QSystemTrayIcon.isSystemTrayAvailable():
+            self.tray = TrayIcon(self)
+            self.tray.show()
 
         # The recent-boards panel floats over the canvas until you start working.
         self.start_panel = StartPanel(self.canvas)
@@ -86,7 +116,7 @@ class MainWindow(QMainWindow):
         """Hide the start panel and let the window shrink again (handy for a
         small reference window in a screen corner)."""
         self.start_panel.hide()
-        self.tool_panel.show()
+        self.show_panels()
         self.setMinimumSize(SMALLEST_WINDOW_WIDTH, SMALLEST_WINDOW_HEIGHT)
         self.canvas.setFocus()  # give the keyboard back to the canvas
 
@@ -100,6 +130,84 @@ class MainWindow(QMainWindow):
         action.setShortcut(keys)
         action.triggered.connect(method)
         self.addAction(action)
+
+    # ---- Overlay mode: on top, click-through --------------------------------
+
+    def overlay_mode(self):
+        """Pinned, click-through and see-through, all at once: refboard is
+        just images floating over your other work."""
+        see_through = self.canvas.background_opacity < 1 or self.canvas.window_opacity < 1
+        return self.pinned and self.click_through and see_through
+
+    def update_panels(self):
+        """Something changed that could start or end overlay mode."""
+        self.window_panel.update()
+        if self.start_panel.isVisible():
+            return  # the panels stay hidden until the start panel is closed
+        if self.overlay_mode():
+            if not self.panel_hide_timer.isActive() and self.tool_panel.isVisible():
+                self.panel_hide_timer.start()
+        else:
+            self.show_panels()
+
+    def show_panels(self):
+        self.panel_hide_timer.stop()
+        self.tool_panel.show()
+        self.window_panel.show()
+
+    def hide_panels(self):
+        self.tool_panel.hide()
+        self.window_panel.hide()
+        self.window_panel.slider.close_slider()
+
+    def toggle_pin(self):
+        """Keep the window in front of all others, or stop."""
+        if set_always_on_top(self, not self.pinned):
+            self.pinned = not self.pinned
+            self.pinned_for_click_through = False  # it's your choice now
+        else:
+            QToolTip.showText(QCursor.pos(), "This desktop doesn't let refboard stay on top.", self)
+        self.update_panels()
+
+    def toggle_click_through(self):
+        """Let clicks go through refboard to the window behind it, or stop.
+
+        While it's on, refboard can't be clicked, so you can't click a button
+        to turn it off again. Instead, it turns off as soon as you switch
+        back to refboard (Alt+Tab or the taskbar): see changeEvent.
+        """
+        self.click_through = not self.click_through
+        # Armed straight away if refboard isn't the active window (for
+        # example, switched on from the tray menu); see changeEvent.
+        self.click_through_armed = not self.isActiveWindow()
+        set_click_through(self, self.click_through)
+        if self.click_through:
+            # Without staying on top, the window you click behind refboard
+            # would come to the front and hide it. So pin it for now.
+            if not self.pinned and set_always_on_top(self, True):
+                self.pinned = True
+                self.pinned_for_click_through = True
+            QToolTip.showText(QCursor.pos(), "Clicks now go through refboard.\n"
+                              "Switch back to it (Alt+Tab, the taskbar or the tray icon)\n"
+                              "to turn this off.", self)
+        elif self.pinned_for_click_through:
+            set_always_on_top(self, False)
+            self.pinned = False
+            self.pinned_for_click_through = False
+        self.update_panels()
+
+    def changeEvent(self, event):
+        # Qt calls this when the window becomes active (in front, with the
+        # keyboard) or inactive. Right after click-through is switched on
+        # refboard is still active, so first wait until it has been inactive
+        # once ("armed"); the next time it becomes active, you switched back
+        # to it on purpose, so click-through ends.
+        if event.type() == QEvent.ActivationChange and self.click_through:
+            if not self.isActiveWindow():
+                self.click_through_armed = True
+            elif self.click_through_armed:
+                self.toggle_click_through()
+        super().changeEvent(event)
 
     # ---- Title bar and unsaved changes -------------------------------------
 
@@ -135,6 +243,9 @@ class MainWindow(QMainWindow):
         # Qt calls this when the window is about to close. ignore() = stay open.
         if self.ok_to_lose_changes():
             release()  # closing normally: nothing to recover next time
+            release_always_on_top()
+            if self.tray is not None:
+                self.tray.hide()  # otherwise it can linger in the tray
             event.accept()
         else:
             event.ignore()
@@ -257,6 +368,7 @@ class MainWindow(QMainWindow):
 def main():
     app = QApplication(sys.argv)
     app.setApplicationName("refboard")
+    app.setWindowIcon(app_icon())  # taskbar and Alt+Tab
 
     window = MainWindow()
     window.show()
