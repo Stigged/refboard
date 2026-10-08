@@ -309,7 +309,8 @@ class WindowPanel(ButtonPanel):
         return False  # only looking; the canvas still handles the event
 
     def opacity_tip(self, setting):
-        return (f"{setting.title} opacity: {setting.percent()}%\n"
+        key = "O" if setting is self.background else shortcut_text("Shift+O")
+        return (f"{setting.title} opacity: {setting.percent()}%  (step: {key})\n"
                 f"Click for a slider, scroll to change, double-click for 100%.\n"
                 f"Reset both: {shortcut_text('Ctrl+Shift+O')}")
 

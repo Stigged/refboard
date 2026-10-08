@@ -42,7 +42,7 @@ WHEEL_UNDO_PAUSE = 0.6  # seconds; scroll notches closer together than this are 
 DUPLICATE_OFFSET = 20  # Ctrl+D puts the copy this many screen pixels down and right
 ARRANGE_GAP = 10  # space between arranged images, in screen pixels
 SNAP_DISTANCE = 8  # dragged images snap when an edge is this close, in screen pixels
-# Temporary, until the window panel has sliders: O and Shift+O step through these.
+# Keyboard shortcuts for opacity: O and Shift+O step through these.
 BACKGROUND_OPACITY_STEPS = [1.0, 0.75, 0.5, 0.25, 0.0]
 WINDOW_OPACITY_STEPS = [1.0, 0.8, 0.6, 0.4]
 
