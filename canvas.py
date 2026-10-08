@@ -103,7 +103,9 @@ class Canvas(QGraphicsView):
         # change when hovering over a scale/rotate handle.
         self.viewport().setMouseTracking(True)
 
-        self._pan_last_pos = None  # set while the middle mouse button is held
+        self._pan_last_pos = None  # set while panning (middle button, or Space + left)
+        self._pan_button = None  # the mouse button that is panning
+        self._space_held = False  # Space down: left-drag pans (for trackpads)
         self._window_drag = None  # set while moving the window ourselves (see Alt+drag)
         self._handle_drag = None  # set while dragging a scale/rotate/crop handle
         self._box = None  # set while dragging a selection box on empty canvas
@@ -614,6 +616,12 @@ class Canvas(QGraphicsView):
             super().keyPressEvent(event)  # QGraphicsView passes it on to the note
             return
 
+        # Holding a key makes the system repeat it; only the first press counts.
+        if event.key() == Qt.Key_Space and not event.isAutoRepeat():
+            self._space_held = True
+            self.update_pan_cursor()
+            return
+
         if self.crop_item is not None:
             if event.key() in (Qt.Key_Return, Qt.Key_Enter):
                 self.finish_crop()
@@ -659,6 +667,32 @@ class Canvas(QGraphicsView):
             action()
             return
         super().keyPressEvent(event)
+
+    def keyReleaseEvent(self, event):
+        if event.key() == Qt.Key_Space and not event.isAutoRepeat() and self._space_held:
+            self.release_space()
+            return
+        super().keyReleaseEvent(event)
+
+    def focusOutEvent(self, event):
+        # If Space is let go while another window has focus, we never hear
+        # about it, so forget it now rather than stay stuck in pan mode.
+        if self._space_held:
+            self.release_space()
+        super().focusOutEvent(event)
+
+    def release_space(self):
+        self._space_held = False
+        self.update_pan_cursor()
+
+    def update_pan_cursor(self):
+        """Closed hand while panning, open hand while Space is held, else normal."""
+        if self._pan_last_pos is not None:
+            self.viewport().setCursor(Qt.ClosedHandCursor)
+        elif self._space_held:
+            self.viewport().setCursor(Qt.OpenHandCursor)
+        else:
+            self.viewport().unsetCursor()
 
     # ---- Mouse wheel: zoom the board, or scale/rotate selected images ------
 
@@ -751,8 +785,11 @@ class Canvas(QGraphicsView):
     def mousePressEvent(self, event):
         pos = event.position().toPoint()
 
-        if event.button() == Qt.MiddleButton:
+        # Middle-drag pans. So does left-drag while Space is held, for
+        # trackpads and Mac mice that have no middle button.
+        if event.button() == Qt.MiddleButton or (event.button() == Qt.LeftButton and self._space_held):
             self._pan_last_pos = pos
+            self._pan_button = event.button()
             self.viewport().setCursor(Qt.ClosedHandCursor)
             return
 
@@ -867,7 +904,8 @@ class Canvas(QGraphicsView):
             return
 
         # No button held: show a hint cursor when hovering over a handle.
-        if event.buttons() == Qt.NoButton:
+        # (Not while Space is held: then the cursor stays a hand.)
+        if event.buttons() == Qt.NoButton and not self._space_held:
             hit = self.handle_at(pos, bool(event.modifiers() & Qt.ControlModifier))
             if hit is None:
                 self.viewport().unsetCursor()
@@ -972,9 +1010,10 @@ class Canvas(QGraphicsView):
         return Qt.SizeBDiagCursor
 
     def mouseReleaseEvent(self, event):
-        if event.button() == Qt.MiddleButton and self._pan_last_pos is not None:
+        if self._pan_last_pos is not None and event.button() == self._pan_button:
             self._pan_last_pos = None
-            self.viewport().unsetCursor()
+            self._pan_button = None
+            self.update_pan_cursor()
             return
         if event.button() == Qt.LeftButton and self._window_drag is not None:
             self._window_drag = None
