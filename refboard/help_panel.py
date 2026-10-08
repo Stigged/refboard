@@ -238,7 +238,9 @@ class HelpPanel(QWidget):
         # up with a new size yet.)
         width = self.scroll.width() - SCROLLBAR_WIDTH
         self.text.setMinimumHeight(0)  # or Qt counts the old minimum in its answer
-        self.text.setMinimumHeight(self.text.heightForWidth(width))
+        height = self.text.heightForWidth(width)
+        if height > 0:  # not yet known (-1) before the panel has a size
+            self.text.setMinimumHeight(height)
 
     def eventFilter(self, watched, event):
         if event.type() == QEvent.Resize and self.isVisible():
