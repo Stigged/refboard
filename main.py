@@ -26,7 +26,10 @@ FILE_FILTER = f"refboard boards (*{FILE_EXTENSION})"
 SMALLEST_WINDOW_WIDTH = 200
 SMALLEST_WINDOW_HEIGHT = 150
 BACKUP_SECONDS = 30  # after a change, a crash backup is written within this many seconds
-PANEL_HIDE_SECONDS = 5  # in full overlay mode, the panels disappear after this long
+# In full overlay mode the panels start fading out this soon (milliseconds).
+# Waiting for the mouse to leave doesn't work: with click-through on, the
+# window takes no mouse input, so to the desktop the mouse has already left.
+PANEL_HIDE_DELAY_MS = 400
 
 
 class MainWindow(QMainWindow):
@@ -75,10 +78,10 @@ class MainWindow(QMainWindow):
         self.window_panel.hide()
 
         # In full overlay mode (see overlay_mode) the panels get out of the
-        # way after a few seconds, so only your images float over the screen.
+        # way straight away, so only your images float over the screen.
         self.panel_hide_timer = QTimer(self)
         self.panel_hide_timer.setSingleShot(True)
-        self.panel_hide_timer.setInterval(PANEL_HIDE_SECONDS * 1000)
+        self.panel_hide_timer.setInterval(PANEL_HIDE_DELAY_MS)
         self.panel_hide_timer.timeout.connect(self.hide_panels)
         self.canvas.opacity_changed.connect(self.update_panels)
 
