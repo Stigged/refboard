@@ -51,6 +51,19 @@ To add it to your app menu (and open `.refboard` files with a double-click):
 ./refboard-x86_64.AppImage --install-menu-entry
 ```
 
+### Windows
+
+Download `refboard-windows-x64.zip` from the
+[Releases](https://github.com/Stigged/refboard/releases) page, extract it
+(right-click > Extract All), open the `refboard` folder and double-click
+`refboard.exe`.
+
+The first time, Windows may say "Windows protected your PC", because
+refboard isn't code-signed (yet). Click **More info**, then **Run anyway**.
+
+Windows support is new and hasn't had much testing yet; if something
+doesn't work, please [open an issue](https://github.com/Stigged/refboard/issues).
+
 ### Any system with Python: pipx
 
 With [pipx](https://pipx.pypa.io/) (and Python 3.10 or newer):

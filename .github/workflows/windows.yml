@@ -1,0 +1,72 @@
+# Builds refboard for Windows on one of GitHub's Windows machines, and
+# attaches the result (a .zip with refboard.exe inside) to the release.
+#
+# Runs by itself when a release is published. To build for an existing
+# release: Actions tab > "Windows build" > Run workflow, and enter its tag.
+
+name: Windows build
+
+on:
+  release:
+    types: [published]
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Release tag to build and attach to (for example v0.1.0)"
+        required: true
+
+permissions:
+  contents: write  # needed to attach the .zip to the release
+
+jobs:
+  windows:
+    runs-on: windows-latest
+    env:
+      TAG: ${{ github.event.release.tag_name || inputs.tag }}
+    steps:
+      - name: Get the code of this release
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ env.TAG }}
+
+      - name: Install Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+
+      - name: Install refboard and PyInstaller
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install . pyinstaller pillow
+
+      # PyInstaller collects refboard, Python and the parts of Qt it uses
+      # into one folder, dist\refboard, with refboard.exe in it. (Pillow
+      # turns the .png icon into the .ico that Windows wants.)
+      - name: Build refboard.exe
+        run: >
+          pyinstaller --noconfirm --clean --log-level WARN
+          --name refboard --windowed
+          --icon refboard/icons/refboard.png
+          --add-data "refboard/icons:refboard/icons"
+          packaging/launcher.py
+
+      # Start it without a screen and check it's still running after a few
+      # seconds, i.e. it didn't crash on start.
+      - name: Check that it starts
+        shell: pwsh
+        run: |
+          $env:QT_QPA_PLATFORM = "offscreen"
+          $app = Start-Process -FilePath "dist\refboard\refboard.exe" -PassThru
+          Start-Sleep -Seconds 15
+          if ($app.HasExited) { Write-Error "refboard.exe stopped (exit code $($app.ExitCode))"; exit 1 }
+          Stop-Process -Id $app.Id
+          Write-Host "refboard.exe started fine"
+
+      - name: Pack it into a .zip
+        shell: pwsh
+        run: Compress-Archive -Path "dist\refboard" -DestinationPath "refboard-windows-x64.zip"
+
+      - name: Attach the .zip to the release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh release upload "${{ env.TAG }}" refboard-windows-x64.zip --clobber
