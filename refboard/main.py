@@ -22,6 +22,7 @@ from .board_file import FILE_EXTENSION, BoardFileError, load_board, read_preview
 from . import __version__
 from .canvas import Canvas
 from .desktop_entry import APP_ID, install_menu_entry, uninstall_menu_entry
+from .help_panel import HelpPanel, welcome_shown
 from .platform_support import (
     release_always_on_top, set_always_on_top, set_click_through, shortcut_text,
 )
@@ -127,6 +128,11 @@ class MainWindow(QMainWindow):
         self.start_panel.open_path_requested.connect(self.open_recent)
         self.start_panel.save_requested.connect(self.save_from_menu)
         self.start_panel.save_as_requested.connect(self.save_as_from_menu)
+        self.start_panel.help_requested.connect(self.show_help)
+        # The shortcuts list (F1), which is also the welcome on first start.
+        self.help_panel = HelpPanel(self.canvas)
+        self.help_panel.closed.connect(self.help_closed)
+        self.back_to_start_panel = False  # see show_help
         self.refresh_recent()
         # While the menu is open, a click on the canvas closes it.
         self.canvas.viewport().installEventFilter(self)
@@ -139,6 +145,7 @@ class MainWindow(QMainWindow):
         self.add_shortcut(QKeySequence.SaveAs, self.save_as)  # Ctrl+Shift+S
         self.add_shortcut(QKeySequence.Open, self.open)  # Ctrl+O
         self.add_shortcut(QKeySequence(Qt.Key_Escape), self.toggle_menu)
+        self.add_shortcut(QKeySequence(Qt.Key_F1), self.show_help)
         # There's no title bar with a close button, so: Ctrl+W or Ctrl+Q
         # (Cmd on a Mac). Both close the window, asking about unsaved changes.
         self.add_shortcut(QKeySequence("Ctrl+T"), self.toggle_click_through)  # like PureRef
@@ -171,6 +178,9 @@ class MainWindow(QMainWindow):
             # refboard still has the keyboard: Esc is the quick way out.
             self.toggle_click_through()
             return
+        if self.help_panel.isVisible():
+            self.help_panel.close_panel()
+            return
         if self.menu_is_open():
             self.close_start_panel()
             return
@@ -187,6 +197,26 @@ class MainWindow(QMainWindow):
             # window doesn't have to grow.
             self.compact_menu.open(recent_boards_with_previews())
 
+    def show_help(self, welcome=False):
+        """The list of shortcuts (F1), or on first start, the welcome."""
+        if self.help_panel.isVisible():
+            return
+        # Opened from the start panel at startup? Then go back to it after.
+        self.back_to_start_panel = self.start_panel.isVisible() and not self.start_panel.menu_mode
+        self.start_panel.hide()
+        self.compact_menu.hide()
+        self.help_panel.open(welcome)
+
+    def show_welcome(self):
+        self.show_help(welcome=True)
+
+    def help_closed(self):
+        if self.back_to_start_panel:
+            self.start_panel.show()
+            self.start_panel.raise_()
+        else:
+            self.canvas.setFocus()
+
     def save_from_menu(self):
         if self.save():
             self.close_start_panel()
@@ -199,6 +229,9 @@ class MainWindow(QMainWindow):
         # A click on the canvas while the menu is open closes the menu (and
         # does nothing else, so it doesn't also deselect your images). Not
         # at startup: there the start panel stays until you pick something.
+        if event.type() == QEvent.MouseButtonPress and self.help_panel.isVisible():
+            self.help_panel.close_panel()
+            return True
         if (event.type() == QEvent.MouseButtonPress and self.menu_is_open()
                 and (self.compact_menu.isVisible() or self.start_panel.menu_mode)):
             self.close_start_panel()
@@ -519,5 +552,8 @@ def main():
     files = [arg for arg in app.arguments()[1:] if not arg.startswith("-")]
     if not window.offer_recovery() and files:
         window.open_path(files[0])
+    # The very first time: a welcome with the basics, before anything else.
+    if not welcome_shown():
+        window.show_welcome()
 
     sys.exit(app.exec())

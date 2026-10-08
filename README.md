@@ -120,6 +120,7 @@ On a Mac, Ctrl is Cmd and Delete is Backspace.
 | Reset both opacities to 100% | Ctrl+Shift+O |
 | Click-through on / off (Esc also turns it off) | Ctrl+T |
 | Menu: save, save as, new, open, recent boards | Esc |
+| All shortcuts | F1 |
 | New / open / save / save as | Ctrl+N / Ctrl+O / Ctrl+S / Ctrl+Shift+S |
 | Close | Ctrl+W or Ctrl+Q |
 

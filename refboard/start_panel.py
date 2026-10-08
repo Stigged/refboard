@@ -58,6 +58,7 @@ class StartPanel(QWidget):
     open_path_requested = Signal(str)  # a recent board was picked; carries its path
     save_requested = Signal()
     save_as_requested = Signal()
+    help_requested = Signal()  # "Shortcuts": show the list of shortcuts
 
     def __init__(self, parent):
         super().__init__(parent)
@@ -91,6 +92,7 @@ class StartPanel(QWidget):
         # The sidebar buttons: (text, shortcut, signal to emit, is it the main one?)
         new = ("New board", QKeySequence(QKeySequence.New), self.new_board_requested, not menu)
         open_ = ("Open board…", QKeySequence(QKeySequence.Open), self.open_requested, False)
+        shortcuts = ("Shortcuts", QKeySequence(Qt.Key_F1), self.help_requested, False)
         self.menu_mode = menu
         if menu:
             self.buttons = [
@@ -98,9 +100,10 @@ class StartPanel(QWidget):
                 ("Save as…", QKeySequence(QKeySequence.SaveAs), self.save_as_requested, False),
                 new,
                 open_,
+                shortcuts,
             ]
         else:
-            self.buttons = [new, open_]
+            self.buttons = [new, open_, shortcuts]
         self.active = None
         self.update()
 
@@ -406,6 +409,7 @@ class CompactMenu(QWidget):
             ("Save as…", native(QKeySequence.SaveAs), panel.save_as_requested.emit),
             ("New board", native(QKeySequence.New), panel.new_board_requested.emit),
             ("Open board…", native(QKeySequence.Open), panel.open_requested.emit),
+            ("Shortcuts", "F1", panel.help_requested.emit),
         ]
         self.first_recent = len(self.rows)
         for path, _preview in recent[:4]:
