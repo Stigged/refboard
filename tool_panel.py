@@ -10,7 +10,7 @@ their own buttons.
 
 import math
 
-from PySide6.QtCore import QEvent, QPointF, QRectF, Qt
+from PySide6.QtCore import QEasingCurve, QEvent, QPointF, QRectF, Qt, QVariantAnimation
 from PySide6.QtGui import QColor, QPainter, QPainterPath, QPen, QTransform
 from PySide6.QtWidgets import QGraphicsDropShadowEffect, QToolTip, QWidget
 
@@ -35,6 +35,9 @@ PANEL_RADIUS = 16
 BUTTON_RADIUS = 10
 ICON_SIZE = 20  # the icons are drawn on a 20 x 20 grid
 ICON_LINE_WIDTH = 1.6
+SHADOW_COLOR = QColor(0, 0, 0, 130)
+FADE_IN_MS = 500  # how long a panel takes to fade in, in milliseconds
+FADE_OUT_MS = 250  # and to fade out
 
 
 # ---- Icons -------------------------------------------------------------------
@@ -184,11 +187,18 @@ class ButtonPanel(QWidget):
         self.hovered = None  # (group, number) of the button under the mouse
 
         # A soft shadow underneath, so the panel looks like it floats.
-        shadow = QGraphicsDropShadowEffect(self)
-        shadow.setBlurRadius(32)
-        shadow.setOffset(0, 8)
-        shadow.setColor(QColor(0, 0, 0, 130))
-        self.setGraphicsEffect(shadow)
+        self.shadow = QGraphicsDropShadowEffect(self)
+        self.shadow.setBlurRadius(32)
+        self.shadow.setOffset(0, 8)
+        self.shadow.setColor(SHADOW_COLOR)
+        self.setGraphicsEffect(self.shadow)
+
+        # Fading in and out (see fade_in and fade_out). 1 = fully there.
+        self.fade = 1.0
+        self.fade_animation = QVariantAnimation(self)
+        self.fade_animation.setEasingCurve(QEasingCurve.InOutQuad)  # gentle start and stop
+        self.fade_animation.valueChanged.connect(self.set_fade)
+        self.fade_animation.finished.connect(self.fade_finished)
 
         self.setMouseTracking(True)
         button_count = sum(len(group) for group in self.groups)
@@ -203,6 +213,41 @@ class ButtonPanel(QWidget):
             self.setFixedSize(length, thickness)
         else:
             self.setFixedSize(thickness, length)
+
+    # ---- Fading in and out ---------------------------------------------------
+    # Qt allows one effect per widget, and ours is the shadow, so we can't
+    # use an opacity effect. Instead paintEvent draws everything see-through
+    # by `fade`, and the shadow is made lighter to match. An animation
+    # changes `fade` a little at a time, many times a second.
+
+    def fade_in(self):
+        if not self.isVisible():
+            self.set_fade(0.0)
+            self.show()
+        self.animate_fade_to(1.0, FADE_IN_MS)
+
+    def fade_out(self):
+        if self.isVisible():
+            self.animate_fade_to(0.0, FADE_OUT_MS)
+
+    def animate_fade_to(self, target, duration):
+        self.fade_animation.stop()
+        self.fade_animation.setDuration(duration)
+        # Start from wherever it is now, so turning around halfway is smooth.
+        self.fade_animation.setStartValue(self.fade)
+        self.fade_animation.setEndValue(target)
+        self.fade_animation.start()
+
+    def set_fade(self, fade):
+        self.fade = fade
+        shadow = QColor(SHADOW_COLOR)
+        shadow.setAlphaF(SHADOW_COLOR.alphaF() * fade)
+        self.shadow.setColor(shadow)
+        self.update()
+
+    def fade_finished(self):
+        if self.fade == 0:
+            self.hide()  # gone completely: don't catch clicks any more
 
     # ---- Layout --------------------------------------------------------------
 
@@ -280,6 +325,7 @@ class ButtonPanel(QWidget):
     def paintEvent(self, event):
         painter = QPainter(self)
         painter.setRenderHint(QPainter.Antialiasing)
+        painter.setOpacity(self.fade)  # everything below is drawn this see-through
 
         painter.setPen(QPen(BORDER_COLOR, 1))
         painter.setBrush(PANEL_COLOR)

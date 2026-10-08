@@ -152,12 +152,12 @@ class MainWindow(QMainWindow):
 
     def show_panels(self):
         self.panel_hide_timer.stop()
-        self.tool_panel.show()
-        self.window_panel.show()
+        self.tool_panel.fade_in()
+        self.window_panel.fade_in()
 
     def hide_panels(self):
-        self.tool_panel.hide()
-        self.window_panel.hide()
+        self.tool_panel.fade_out()
+        self.window_panel.fade_out()
         self.window_panel.slider.close_slider()
 
     def toggle_pin(self):
