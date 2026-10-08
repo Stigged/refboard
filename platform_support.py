@@ -12,6 +12,13 @@ from PySide6.QtGui import QKeySequence
 
 IS_MACOS = sys.platform == "darwin"
 
+EDGE_NAMES = {
+    "left": Qt.LeftEdge,
+    "right": Qt.RightEdge,
+    "top": Qt.TopEdge,
+    "bottom": Qt.BottomEdge,
+}
+
 
 def start_window_move(window):
     """Let the operating system move `window` with the mouse, as if you were
@@ -24,6 +31,24 @@ def start_window_move(window):
     """
     handle = window.windowHandle()
     return handle is not None and handle.startSystemMove()
+
+
+def start_window_resize(window, edges):
+    """Let the operating system resize `window` with the mouse, from `edges`
+    (a set with "left", "right", "top" and/or "bottom"). Call this while a
+    mouse button is held.
+
+    Works on Windows, X11 and Wayland. macOS doesn't support it, so there
+    this returns False and the caller resizes the window itself (see
+    WindowFrame.continue_manual_resize).
+    """
+    handle = window.windowHandle()
+    if handle is None:
+        return False
+    qt_edges = Qt.Edges()
+    for edge in edges:
+        qt_edges |= EDGE_NAMES[edge]
+    return handle.startSystemResize(qt_edges)
 
 
 def shortcut_text(keys):

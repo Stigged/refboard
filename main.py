@@ -14,6 +14,7 @@ from canvas import Canvas
 from recent import add_recent_board, recent_boards, remove_recent_board
 from start_panel import MIN_WINDOW_HEIGHT, MIN_WINDOW_WIDTH, StartPanel
 from tool_panel import ToolPanel
+from window_frame import WindowFrame
 
 FILE_FILTER = f"refboard boards (*{FILE_EXTENSION})"
 # Once the start panel is closed, the window may get this small.
@@ -23,10 +24,13 @@ BACKUP_SECONDS = 30  # after a change, a crash backup is written within this man
 
 
 class MainWindow(QMainWindow):
-    """The window around the canvas. Handles files: open, save, and the title bar."""
+    """The window around the canvas. Handles files: open, save, and the window title."""
 
     def __init__(self):
         super().__init__()
+        # No title bar or border, like PureRef. WindowFrame (below) gives
+        # back what the border did: an outline and resizing from the edges.
+        self.setWindowFlag(Qt.FramelessWindowHint)
         self.canvas = Canvas()
         self.setCentralWidget(self.canvas)
         self.resize(1000, 700)
@@ -59,11 +63,18 @@ class MainWindow(QMainWindow):
         self.start_panel.open_path_requested.connect(self.open_recent)
         self.refresh_recent()
 
+        # Created after the canvas and panels, so its outline lies on top of them.
+        self.frame = WindowFrame(self)
+
         self.add_shortcut(QKeySequence.New, self.new_board)  # Ctrl+N
         self.add_shortcut(QKeySequence.Save, self.save)  # Ctrl+S
         self.add_shortcut(QKeySequence.SaveAs, self.save_as)  # Ctrl+Shift+S
         self.add_shortcut(QKeySequence.Open, self.open)  # Ctrl+O
         self.add_shortcut(QKeySequence(Qt.Key_Escape), self.close_start_panel)
+        # There's no title bar with a close button, so: Ctrl+W or Ctrl+Q
+        # (Cmd on a Mac). Both close the window, asking about unsaved changes.
+        self.add_shortcut(QKeySequence("Ctrl+W"), self.close)
+        self.add_shortcut(QKeySequence("Ctrl+Q"), self.close)
 
         self.update_title()
 
