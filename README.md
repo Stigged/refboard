@@ -32,21 +32,54 @@ its makers.
   - the panels fade away while overlay mode is on
 - **Tray icon** with the overlay switches. Clicking it also ends click-through.
 
-## Running it
+## Installing
 
-You need Python 3 (it's developed with Python 3.14).
+### Linux: AppImage (easiest)
+
+Download `refboard-x86_64.AppImage` from the
+[Releases](https://github.com/Stigged/refboard/releases) page. It's a
+single file with everything included. Make it executable and run it:
+
+```sh
+chmod +x refboard-x86_64.AppImage
+./refboard-x86_64.AppImage
+```
+
+To add it to your app menu (and open `.refboard` files with a double-click):
+
+```sh
+./refboard-x86_64.AppImage --install-menu-entry
+```
+
+### Any system with Python: pipx
+
+With [pipx](https://pipx.pypa.io/) (and Python 3.10 or newer):
+
+```sh
+pipx install git+https://github.com/Stigged/refboard.git
+refboard
+```
+
+On Linux, `refboard --install-menu-entry` adds it to your app menu.
+
+### From the source code
 
 ```sh
 git clone https://github.com/Stigged/refboard.git
 cd refboard
 python -m venv .venv
-.venv/bin/pip install -r requirements.txt
-.venv/bin/python main.py
+.venv/bin/pip install -e .
+.venv/bin/refboard
 ```
 
-On Windows, use `.venv\Scripts\pip` and `.venv\Scripts\python` instead.
+On Windows, use `.venv\Scripts\pip` and `.venv\Scripts\refboard` instead.
 
-You can also open a board directly: `.venv/bin/python main.py my-board.refboard`
+You can also open a board directly: `refboard my-board.refboard`
+
+To build the AppImage yourself: `sh packaging/build_appimage.sh`
+(the result lands in `build/`).
+
+To take the app-menu entry out again: `refboard --uninstall-menu-entry`
 
 ## Mouse
 
@@ -85,6 +118,8 @@ On a Mac, Ctrl is Cmd and Delete is Backspace.
 | Bring to front / send to back | Ctrl+] / Ctrl+[ |
 | Background opacity / window opacity | O / Shift+O |
 | Reset both opacities to 100% | Ctrl+Shift+O |
+| Click-through on / off (Esc also turns it off) | Ctrl+T |
+| Menu: save, save as, new, open, recent boards | Esc |
 | New / open / save / save as | Ctrl+N / Ctrl+O / Ctrl+S / Ctrl+Shift+S |
 | Close | Ctrl+W or Ctrl+Q |
 
@@ -98,9 +133,6 @@ been tested there yet. A few overlay features depend on the desktop:
   script). On X11, Windows and macOS it uses Qt's normal way.
 - **Window opacity** is drawn by refboard itself, so it works everywhere,
   including Wayland.
-
-See [research/cross-platform-audit.md](research/cross-platform-audit.md)
-for the details.
 
 ## License
 

@@ -13,11 +13,11 @@ from PySide6.QtWidgets import (
     QApplication, QFrame, QGraphicsOpacityEffect, QGraphicsScene, QGraphicsView, QToolTip,
 )
 
-from board_item import HANDLE_GRAB, ROTATE_GRAB, BoardItem
-from context_menu import show_context_menu
-from image_item import MIN_CROP_SIZE, ImageItem
-from note_item import NoteItem
-from platform_support import is_delete_key, start_window_move
+from .board_item import HANDLE_GRAB, ROTATE_GRAB, BoardItem
+from .context_menu import show_context_menu
+from .image_item import MIN_CROP_SIZE, ImageItem
+from .note_item import NoteItem
+from .platform_support import is_delete_key, start_window_move
 
 # Look and feel. Tweak these freely.
 # Colors borrowed from Apple's dark-mode system grays.

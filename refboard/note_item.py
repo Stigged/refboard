@@ -4,7 +4,7 @@ from PySide6.QtCore import QPointF, Qt, Signal
 from PySide6.QtGui import QColor, QFont, QKeySequence, QPen, QTextCursor
 from PySide6.QtWidgets import QApplication, QGraphicsItem, QGraphicsTextItem, QStyle
 
-from board_item import ACCENT_COLOR, BoardItem
+from .board_item import ACCENT_COLOR, BoardItem
 
 NOTE_TEXT_COLOR = QColor("#E5E5EA")
 NOTE_BACKGROUND = QColor(44, 44, 46, 235)  # Apple "#2C2C2E", a tiny bit see-through

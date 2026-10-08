@@ -12,18 +12,26 @@ from PySide6.QtCore import QPointF, QRectF, Qt
 from PySide6.QtGui import QAction, QColor, QIcon, QPainter, QPen, QPixmap
 from PySide6.QtWidgets import QMenu, QSystemTrayIcon
 
-from shapes import squircle_path
-from tool_panel import ACTIVE_COLOR
+from .shapes import squircle_path
+from .tool_panel import ACTIVE_COLOR
 
 ICON_SIZES = (16, 22, 24, 32, 48, 64)  # trays differ; give the desktop a choice
 
 
 def draw_icon(size):
-    """A blue rounded square with two overlapping white frames:
-    pictures on a board."""
+    """The app icon as a picture of size x size pixels."""
     pixmap = QPixmap(size, size)
     pixmap.fill(Qt.transparent)
     painter = QPainter(pixmap)
+    paint_icon(painter, size)
+    painter.end()
+    return pixmap
+
+
+def paint_icon(painter, size):
+    """Paint the app icon: a blue rounded square with two overlapping white
+    frames, pictures on a board. (Also used to make the icon files for the
+    app menu; see packaging/make_icons.py.)"""
     painter.setRenderHint(QPainter.Antialiasing)
     painter.scale(size / 20, size / 20)  # draw on a 20 x 20 grid
     painter.setPen(Qt.NoPen)
@@ -36,8 +44,6 @@ def draw_icon(size):
     painter.drawRect(QRectF(5, 5, 7, 6))
     painter.setBrush(ACTIVE_COLOR)  # the front frame hides the one behind it
     painter.drawRect(QRectF(8, 9, 7, 6))
-    painter.end()
-    return pixmap
 
 
 def app_icon():

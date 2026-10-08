@@ -14,8 +14,8 @@ from PySide6.QtCore import QEasingCurve, QEvent, QPointF, QRectF, Qt, QVariantAn
 from PySide6.QtGui import QColor, QPainter, QPainterPath, QPen, QTransform
 from PySide6.QtWidgets import QGraphicsDropShadowEffect, QToolTip, QWidget
 
-from platform_support import delete_shortcut_text, shortcut_text
-from shapes import squircle_path
+from .platform_support import delete_shortcut_text, shortcut_text
+from .shapes import squircle_path
 
 # Colors (same Apple dark-mode grays as the start panel).
 PANEL_COLOR = QColor("#2C2C2E")  # one shade lighter than the canvas

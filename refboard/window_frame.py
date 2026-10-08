@@ -17,7 +17,7 @@ from PySide6.QtCore import QEvent, QObject, QRect, QRectF, Qt
 from PySide6.QtGui import QColor, QPainter, QPen
 from PySide6.QtWidgets import QApplication, QWidget
 
-from platform_support import start_window_resize
+from .platform_support import start_window_resize
 
 EDGE_GRAB = 6  # how close to an edge (in pixels) the mouse must be to resize
 CORNER_GRAB = 16  # near a corner, resize both ways from this far along the edge

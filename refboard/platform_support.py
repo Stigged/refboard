@@ -81,8 +81,7 @@ def is_delete_key(key):
 # JavaScript scripts sent to it over D-Bus (the message bus programs on the
 # Linux desktop use to talk to each other). Ours finds the windows that
 # belong to refboard's process and switches on their "Keep Above Others",
-# the same setting as in the title-bar menu. Tested in
-# research/experiments/always_on_top.py.
+# the same setting as in the title-bar menu (tested on KDE Plasma 6).
 
 KWIN_SCRIPT = """
 for (const window of workspace.windowList()) {

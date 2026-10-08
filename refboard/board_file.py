@@ -15,7 +15,7 @@ import zipfile
 from PySide6.QtCore import QBuffer, QIODevice, QPointF, QRect
 from PySide6.QtGui import QImage, QPixmap
 
-from note_item import NoteItem
+from .note_item import NoteItem
 
 FILE_EXTENSION = ".refboard"
 # Bump this if the layout of board.json changes. 2 added notes, flipping,

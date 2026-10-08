@@ -7,7 +7,7 @@ matches the dark tool panel instead of the system theme.
 from PySide6.QtCore import Qt
 from PySide6.QtWidgets import QApplication, QMenu
 
-from platform_support import delete_shortcut_text, shortcut_text
+from .platform_support import delete_shortcut_text, shortcut_text
 
 # Same Apple dark-mode colors as the tool panel and start panel.
 MENU_STYLE = """

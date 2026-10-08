@@ -1,35 +1,46 @@
-"""Start refboard. Run with:  .venv/bin/python main.py  [optional: a .refboard file]"""
+"""Start refboard.
+
+Run with:  refboard [a .refboard file]   (once installed)
+     or:   python -m refboard [a .refboard file]   (from this folder)
+
+Also:  refboard --install-menu-entry     add refboard to your app menu (Linux)
+       refboard --uninstall-menu-entry   take it out again
+"""
 
 import sys
 from datetime import datetime
 from pathlib import Path
 
-from PySide6.QtCore import QEvent, Qt, QTimer
+from PySide6.QtCore import QEasingCurve, QEvent, QSize, Qt, QTimer, QVariantAnimation
 from PySide6.QtGui import QAction, QCursor, QKeySequence
 from PySide6.QtWidgets import (
     QApplication, QFileDialog, QMainWindow, QMessageBox, QSystemTrayIcon, QToolTip,
 )
 
-from backup import backup_path, forget, left_behind, release, remove_backup
-from board_file import FILE_EXTENSION, BoardFileError, load_board, read_preview, save_board
-from canvas import Canvas
-from platform_support import release_always_on_top, set_always_on_top, set_click_through
-from recent import add_recent_board, recent_boards, remove_recent_board
-from start_panel import MIN_WINDOW_HEIGHT, MIN_WINDOW_WIDTH, StartPanel
-from tool_panel import ToolPanel
-from tray_icon import TrayIcon, app_icon
-from window_frame import WindowFrame
-from window_panel import WindowPanel
+from .backup import backup_path, forget, left_behind, release, remove_backup
+from .board_file import FILE_EXTENSION, BoardFileError, load_board, read_preview, save_board
+from . import __version__
+from .canvas import Canvas
+from .desktop_entry import APP_ID, install_menu_entry, uninstall_menu_entry
+from .platform_support import (
+    release_always_on_top, set_always_on_top, set_click_through, shortcut_text,
+)
+from .recent import add_recent_board, recent_boards, remove_recent_board
+from .start_panel import MIN_WINDOW_HEIGHT, MIN_WINDOW_WIDTH, CompactMenu, StartPanel
+from .tool_panel import EDGE_MARGIN, FADE_OUT_MS, ToolPanel
+from .tray_icon import TrayIcon, app_icon
+from .window_frame import WindowFrame
+from .window_panel import PANEL_GAP, WindowPanel
 
 FILE_FILTER = f"refboard boards (*{FILE_EXTENSION})"
-# Once the start panel is closed, the window may get this small.
-SMALLEST_WINDOW_WIDTH = 200
-SMALLEST_WINDOW_HEIGHT = 150
 BACKUP_SECONDS = 30  # after a change, a crash backup is written within this many seconds
 # In full overlay mode the panels start fading out this soon (milliseconds).
 # Waiting for the mouse to leave doesn't work: with click-through on, the
 # window takes no mouse input, so to the desktop the mouse has already left.
 PANEL_HIDE_DELAY_MS = 400
+# Pinned + click-through: the window fades to at most this opacity, so you
+# can see what you're clicking on behind it.
+CLICK_THROUGH_OPACITY = 0.5
 
 
 class MainWindow(QMainWindow):
@@ -69,6 +80,18 @@ class MainWindow(QMainWindow):
         self.click_through = False  # clicks go to the window behind us
         self.click_through_armed = False  # see changeEvent
         self.pinned_for_click_through = False  # we pinned only because of click-through
+        # The window opacity from before pin + click-through faded it (see
+        # update_click_through_opacity), or None.
+        self.opacity_before_click_through = None
+        # That fade happens in step with the panels: wait, then fade smoothly.
+        self.opacity_fade_delay = QTimer(self)
+        self.opacity_fade_delay.setSingleShot(True)
+        self.opacity_fade_delay.setInterval(PANEL_HIDE_DELAY_MS)
+        self.opacity_fade_delay.timeout.connect(self.start_opacity_fade)
+        self.opacity_fade = QVariantAnimation(self)
+        self.opacity_fade.setDuration(FADE_OUT_MS)
+        self.opacity_fade.setEasingCurve(QEasingCurve.InOutQuad)
+        self.opacity_fade.valueChanged.connect(self.canvas.set_window_opacity)
 
         # The tool panel on the left edge and the window panel along the
         # bottom; both hidden while the start panel shows.
@@ -76,6 +99,7 @@ class MainWindow(QMainWindow):
         self.tool_panel.hide()
         self.window_panel = WindowPanel(self.canvas, self)
         self.window_panel.hide()
+        self.window_panel.avoid(self.tool_panel)
 
         # In full overlay mode (see overlay_mode) the panels get out of the
         # way straight away, so only your images float over the screen.
@@ -93,12 +117,19 @@ class MainWindow(QMainWindow):
             self.tray.show()
 
         # The recent-boards panel floats over the canvas until you start working.
+        # Later, Esc brings it back as the menu (see toggle_menu); in a small
+        # window the compact menu takes its place. Both send the same signals.
         self.start_panel = StartPanel(self.canvas)
+        self.compact_menu = CompactMenu(self.canvas, self.start_panel)
         self.canvas.changed.connect(self.close_start_panel)
         self.start_panel.new_board_requested.connect(self.new_board)
         self.start_panel.open_requested.connect(self.open)
         self.start_panel.open_path_requested.connect(self.open_recent)
+        self.start_panel.save_requested.connect(self.save_from_menu)
+        self.start_panel.save_as_requested.connect(self.save_as_from_menu)
         self.refresh_recent()
+        # While the menu is open, a click on the canvas closes it.
+        self.canvas.viewport().installEventFilter(self)
 
         # Created after the canvas and panels, so its outline lies on top of them.
         self.frame = WindowFrame(self)
@@ -107,25 +138,85 @@ class MainWindow(QMainWindow):
         self.add_shortcut(QKeySequence.Save, self.save)  # Ctrl+S
         self.add_shortcut(QKeySequence.SaveAs, self.save_as)  # Ctrl+Shift+S
         self.add_shortcut(QKeySequence.Open, self.open)  # Ctrl+O
-        self.add_shortcut(QKeySequence(Qt.Key_Escape), self.close_start_panel)
+        self.add_shortcut(QKeySequence(Qt.Key_Escape), self.toggle_menu)
         # There's no title bar with a close button, so: Ctrl+W or Ctrl+Q
         # (Cmd on a Mac). Both close the window, asking about unsaved changes.
+        self.add_shortcut(QKeySequence("Ctrl+T"), self.toggle_click_through)  # like PureRef
         self.add_shortcut(QKeySequence("Ctrl+W"), self.close)
         self.add_shortcut(QKeySequence("Ctrl+Q"), self.close)
 
         self.update_title()
 
     def close_start_panel(self):
-        """Hide the start panel and let the window shrink again (handy for a
-        small reference window in a screen corner)."""
+        """Hide the start panel (or the menu) and let the window shrink again
+        (handy for a small reference window in a screen corner)."""
         self.start_panel.hide()
+        self.compact_menu.hide()
         self.show_panels()
-        self.setMinimumSize(SMALLEST_WINDOW_WIDTH, SMALLEST_WINDOW_HEIGHT)
+        self.setMinimumSize(self.smallest_size())
         self.canvas.setFocus()  # give the keyboard back to the canvas
+
+    # ---- The menu (Esc) ------------------------------------------------------
+
+    def menu_is_open(self):
+        return self.start_panel.isVisible() or self.compact_menu.isVisible()
+
+    def toggle_menu(self):
+        """Esc: open the menu, or close it (or the start panel) again.
+
+        (While cropping or typing in a note, the canvas keeps Esc for
+        itself, and an open opacity slider closes first; see their code.)
+        """
+        if self.click_through:
+            # refboard still has the keyboard: Esc is the quick way out.
+            self.toggle_click_through()
+            return
+        if self.menu_is_open():
+            self.close_start_panel()
+            return
+        self.refresh_recent()
+        canvas = self.canvas
+        if canvas.width() >= MIN_WINDOW_WIDTH and canvas.height() >= MIN_WINDOW_HEIGHT:
+            self.start_panel.set_menu_mode(True)
+            self.start_panel.show()
+            self.start_panel.raise_()
+            # Keep the window big enough for it while it's open.
+            self.setMinimumSize(MIN_WINDOW_WIDTH, MIN_WINDOW_HEIGHT)
+        else:
+            # Too small for the full panel: the short list instead, so the
+            # window doesn't have to grow.
+            self.compact_menu.open(recent_boards_with_previews())
+
+    def save_from_menu(self):
+        if self.save():
+            self.close_start_panel()
+
+    def save_as_from_menu(self):
+        if self.save_as():
+            self.close_start_panel()
+
+    def eventFilter(self, watched, event):
+        # A click on the canvas while the menu is open closes the menu (and
+        # does nothing else, so it doesn't also deselect your images). Not
+        # at startup: there the start panel stays until you pick something.
+        if (event.type() == QEvent.MouseButtonPress and self.menu_is_open()
+                and (self.compact_menu.isVisible() or self.start_panel.menu_mode)):
+            self.close_start_panel()
+            return True
+        return False
+
+    def smallest_size(self):
+        """Once the start panel is closed, the window may get this small:
+        just big enough for both panels side by side, with a margin all
+        round, so they never overlap and are never cut off."""
+        tool, bottom = self.tool_panel, self.window_panel
+        width = EDGE_MARGIN + tool.width() + PANEL_GAP + bottom.width() + EDGE_MARGIN
+        height = EDGE_MARGIN + max(tool.height(), bottom.height()) + EDGE_MARGIN
+        return QSize(width, height)
 
     def refresh_recent(self):
         """Give the start panel the current list of recent boards, with previews."""
-        self.start_panel.set_recent([(path, read_preview(path)) for path in recent_boards()])
+        self.start_panel.set_recent(recent_boards_with_previews())
 
     def add_shortcut(self, keys, method):
         """Run `method` when `keys` are pressed anywhere in the window."""
@@ -139,8 +230,36 @@ class MainWindow(QMainWindow):
     def overlay_mode(self):
         """Pinned, click-through and see-through, all at once: refboard is
         just images floating over your other work."""
-        see_through = self.canvas.background_opacity < 1 or self.canvas.window_opacity < 1
+        see_through = (self.canvas.background_opacity < 1 or self.canvas.window_opacity < 1
+                       or self.opacity_before_click_through is not None)  # about to fade
         return self.pinned and self.click_through and see_through
+
+    def update_click_through_opacity(self):
+        """Pinned and click-through: fade the window to 50% (unless it's
+        already fainter). When either turns off, put the opacity back."""
+        canvas = self.canvas
+        if self.pinned and self.click_through:
+            if self.opacity_before_click_through is None:
+                self.opacity_before_click_through = canvas.window_opacity
+                if canvas.window_opacity > CLICK_THROUGH_OPACITY:
+                    self.opacity_fade_delay.start()  # see start_opacity_fade
+        elif self.opacity_before_click_through is not None:
+            was_fading = (self.opacity_fade_delay.isActive()
+                          or self.opacity_fade.state() == QVariantAnimation.Running)
+            self.opacity_fade_delay.stop()
+            self.opacity_fade.stop()
+            # Only undo our own change: if the opacity was changed in the
+            # meantime (say, "Reset opacity" in the tray menu), keep that.
+            ours = min(self.opacity_before_click_through, CLICK_THROUGH_OPACITY)
+            if was_fading or canvas.window_opacity == ours:
+                canvas.set_window_opacity(self.opacity_before_click_through)
+            self.opacity_before_click_through = None
+
+    def start_opacity_fade(self):
+        """Fade the window smoothly down to CLICK_THROUGH_OPACITY."""
+        self.opacity_fade.setStartValue(self.canvas.window_opacity)
+        self.opacity_fade.setEndValue(CLICK_THROUGH_OPACITY)
+        self.opacity_fade.start()
 
     def update_panels(self):
         """Something changed that could start or end overlay mode."""
@@ -170,14 +289,19 @@ class MainWindow(QMainWindow):
             self.pinned_for_click_through = False  # it's your choice now
         else:
             QToolTip.showText(QCursor.pos(), "This desktop doesn't let refboard stay on top.", self)
+        self.update_click_through_opacity()
         self.update_panels()
 
     def toggle_click_through(self):
         """Let clicks go through refboard to the window behind it, or stop.
 
         While it's on, refboard can't be clicked, so you can't click a button
-        to turn it off again. Instead, it turns off as soon as you switch
-        back to refboard (Alt+Tab or the taskbar): see changeEvent.
+        to turn it off again. Instead:
+        - Right after switching it on, refboard still has the keyboard
+          (Wayland doesn't let an app hand it to the window behind), so
+          Esc or Ctrl+T turns it off again.
+        - Once you've clicked into another app, switching back to refboard
+          (Alt+Tab, the taskbar or the tray icon) turns it off: see changeEvent.
         """
         self.click_through = not self.click_through
         # Armed straight away if refboard isn't the active window (for
@@ -191,12 +315,13 @@ class MainWindow(QMainWindow):
                 self.pinned = True
                 self.pinned_for_click_through = True
             QToolTip.showText(QCursor.pos(), "Clicks now go through refboard.\n"
-                              "Switch back to it (Alt+Tab, the taskbar or the tray icon)\n"
-                              "to turn this off.", self)
+                              f"{shortcut_text('Ctrl+T')} or Esc turns this off, or switch back to\n"
+                              "refboard later (Alt+Tab, the taskbar or the tray icon).", self)
         elif self.pinned_for_click_through:
             set_always_on_top(self, False)
             self.pinned = False
             self.pinned_for_click_through = False
+        self.update_click_through_opacity()
         self.update_panels()
 
     def changeEvent(self, event):
@@ -368,20 +493,31 @@ class MainWindow(QMainWindow):
         return True
 
 
+def recent_boards_with_previews():
+    """The recent boards, as a list of (path, preview picture or None)."""
+    return [(path, read_preview(path)) for path in recent_boards()]
+
+
 def main():
+    if "--install-menu-entry" in sys.argv[1:]:
+        sys.exit(install_menu_entry())
+    if "--uninstall-menu-entry" in sys.argv[1:]:
+        sys.exit(uninstall_menu_entry())
+
     app = QApplication(sys.argv)
     app.setApplicationName("refboard")
+    app.setApplicationVersion(__version__)
+    # Wayland desktops use this to match the window to refboard's app-menu
+    # entry (for the taskbar icon and name). It's the .desktop file's name.
+    app.setDesktopFileName(APP_ID)
     app.setWindowIcon(app_icon())  # taskbar and Alt+Tab
 
     window = MainWindow()
     window.show()
     # Crashed last time? Offer the backup first. Otherwise, if started as
-    # "main.py some_board.refboard", open that board.
-    if not window.offer_recovery() and len(sys.argv) > 1:
-        window.open_path(sys.argv[1])
+    # "refboard some_board.refboard" (or by double-clicking a board), open it.
+    files = [arg for arg in app.arguments()[1:] if not arg.startswith("-")]
+    if not window.offer_recovery() and files:
+        window.open_path(files[0])
 
     sys.exit(app.exec())
-
-
-if __name__ == "__main__":
-    main()

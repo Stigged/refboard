@@ -10,9 +10,9 @@ from PySide6.QtCore import QEvent, QPoint, QPointF, QRectF, Qt
 from PySide6.QtGui import QColor, QFont, QPainter, QPainterPath, QPen
 from PySide6.QtWidgets import QApplication, QGraphicsDropShadowEffect, QWidget
 
-from platform_support import shortcut_text
-from shapes import squircle_path
-from tool_panel import (
+from .platform_support import shortcut_text
+from .shapes import squircle_path
+from .tool_panel import (
     ACTIVE_COLOR, BORDER_COLOR, BUTTON_RADIUS, EDGE_MARGIN, ICON_COLOR, PANEL_COLOR, ButtonPanel,
 )
 
@@ -23,6 +23,7 @@ SLIDER_WIDTH = 220
 SLIDER_HEIGHT = 64
 SLIDER_PADDING = 14
 SLIDER_GAP = 8  # between the window panel and a slider above it
+PANEL_GAP = 12  # the least room kept between this panel and the tool panel
 KNOB_RADIUS = 7
 
 
@@ -276,8 +277,9 @@ class WindowPanel(ButtonPanel):
                 (icon_pin(), "Keep on top of other windows", window.toggle_pin, always,
                  lambda: window.pinned),
                 (icon_click_through(),
-                 "Click-through: clicks go to the window behind refboard.\n"
-                 "Switch back to refboard (Alt+Tab, the taskbar or the tray icon) to turn it off.",
+                 f"Click-through  ({shortcut_text('Ctrl+T')}): clicks go to the window behind refboard.\n"
+                 f"To turn it off: {shortcut_text('Ctrl+T')} or Esc, or switch back to refboard\n"
+                 "(Alt+Tab, the taskbar or the tray icon).",
                  window.toggle_click_through, always, lambda: window.click_through),
                 (icon_background_opacity(),
                  lambda: self.opacity_tip(self.background),
@@ -292,15 +294,29 @@ class WindowPanel(ButtonPanel):
             ],
         ]
         super().__init__(canvas, groups, horizontal=True)
+        self.other_panel = None  # see avoid()
         self.slider = OpacitySlider(canvas)
         canvas.opacity_changed.connect(self.update)
         canvas.installEventFilter(self)  # to stay in place when the window is resized
         self.place()
 
+    def avoid(self, panel):
+        """Never overlap `panel` (the tool panel on the left edge)."""
+        self.other_panel = panel
+        self.place()
+
     def place(self):
-        """Bottom edge, with a margin; horizontally centred."""
-        self.move((self.canvas.width() - self.width()) // 2,
-                  self.canvas.height() - self.height() - EDGE_MARGIN)
+        """Bottom edge, with a margin; horizontally centred. But if that
+        would overlap the tool panel, slide right just far enough to clear it."""
+        x = (self.canvas.width() - self.width()) // 2
+        y = self.canvas.height() - self.height() - EDGE_MARGIN
+        other = self.other_panel
+        if other is not None:
+            other.place()  # make sure it's in its spot for this window size first
+            reaches_down_to_us = other.geometry().bottom() >= y - PANEL_GAP
+            if reaches_down_to_us:
+                x = max(x, other.geometry().right() + 1 + PANEL_GAP)
+        self.move(x, y)
 
     def eventFilter(self, watched, event):
         if event.type() == QEvent.Resize:

@@ -1,4 +1,10 @@
-"""The start panel: a floating card with a sidebar (new / open) and your recent boards."""
+"""The start panel: a floating card with a sidebar (new / open) and your recent boards.
+
+It shows when refboard starts. While you work, Esc brings it back as the
+menu, with Save and Save as added (see StartPanel.set_menu_mode). In a
+window too small for it, Esc opens CompactMenu instead: the same choices
+as a short list.
+"""
 
 from pathlib import Path
 
@@ -6,7 +12,7 @@ from PySide6.QtCore import QEvent, QPointF, QRectF, Qt, Signal
 from PySide6.QtGui import QColor, QFont, QKeySequence, QPainter, QPen
 from PySide6.QtWidgets import QGraphicsDropShadowEffect, QWidget
 
-from shapes import squircle_path
+from .shapes import squircle_path
 
 # Colors: Apple dark-mode "elevated" grays.
 PANEL_COLOR = QColor("#2C2C2E")
@@ -50,6 +56,8 @@ class StartPanel(QWidget):
     new_board_requested = Signal()
     open_requested = Signal()
     open_path_requested = Signal(str)  # a recent board was picked; carries its path
+    save_requested = Signal()
+    save_as_requested = Signal()
 
     def __init__(self, parent):
         super().__init__(parent)
@@ -61,11 +69,8 @@ class StartPanel(QWidget):
         shadow.setColor(QColor(0, 0, 0, 150))
         self.setGraphicsEffect(shadow)
 
-        # The sidebar buttons: (text, shortcut, signal to emit, is it the main one?)
-        self.buttons = [
-            ("New board", QKeySequence(QKeySequence.New), self.new_board_requested, True),
-            ("Open board…", QKeySequence(QKeySequence.Open), self.open_requested, False),
-        ]
+        self.buttons = []  # filled in by set_menu_mode
+        self.set_menu_mode(False)
         self.recent = []  # list of (path, preview QImage or None), newest first
 
         self.active = None  # the highlighted target (mouse hover or arrow keys), or None
@@ -79,6 +84,25 @@ class StartPanel(QWidget):
         # Watch the parent's events, so we notice when it's resized.
         parent.installEventFilter(self)
         self.center_in_parent()
+
+    def set_menu_mode(self, menu):
+        """At startup the sidebar offers New and Open. As the menu (Esc while
+        working) it also offers Save and Save as, and Save is the blue one."""
+        # The sidebar buttons: (text, shortcut, signal to emit, is it the main one?)
+        new = ("New board", QKeySequence(QKeySequence.New), self.new_board_requested, not menu)
+        open_ = ("Open board…", QKeySequence(QKeySequence.Open), self.open_requested, False)
+        self.menu_mode = menu
+        if menu:
+            self.buttons = [
+                ("Save", QKeySequence(QKeySequence.Save), self.save_requested, True),
+                ("Save as…", QKeySequence(QKeySequence.SaveAs), self.save_as_requested, False),
+                new,
+                open_,
+            ]
+        else:
+            self.buttons = [new, open_]
+        self.active = None
+        self.update()
 
     def set_recent(self, recent):
         """Show these boards: a list of (path, preview image or None)."""
@@ -336,3 +360,154 @@ class StartPanel(QWidget):
             label_area = QRectF(rect.left() + 2, rect.bottom(), rect.width() - 4, LABEL_HEIGHT)
             name = painter.fontMetrics().elidedText(Path(path).stem, Qt.ElideRight, int(label_area.width()))
             painter.drawText(label_area, Qt.AlignLeft | Qt.AlignVCenter, name)
+
+
+# ---- The compact menu --------------------------------------------------------
+
+COMPACT_WIDTH = 240
+COMPACT_PADDING = 6
+ROW_HEIGHT = 30
+SECTION_HEIGHT = 26  # the small "Recent boards" heading
+COMPACT_RADIUS = 14
+ROW_RADIUS = 8
+
+
+class CompactMenu(QWidget):
+    """The menu for a small window: Save, Save as, New, Open and the recent
+    boards, as one short list in the middle of the canvas.
+
+    Uses the start panel's signals, so the window handles both the same way.
+    """
+
+    def __init__(self, parent, start_panel):
+        super().__init__(parent)
+        self.start_panel = start_panel
+        self.rows = []  # (text, shortcut text, what to call)
+        self.first_recent = 0  # number of the first recent-board row
+        self.active = None  # number of the highlighted row
+        self.setMouseTracking(True)
+        self.setFocusPolicy(Qt.StrongFocus)
+
+        shadow = QGraphicsDropShadowEffect(self)
+        shadow.setBlurRadius(32)
+        shadow.setOffset(0, 8)
+        shadow.setColor(QColor(0, 0, 0, 150))
+        self.setGraphicsEffect(shadow)
+
+        parent.installEventFilter(self)  # to stay centred when the window is resized
+        self.hide()
+
+    def open(self, recent):
+        """Show the menu, with these recent boards: a list of (path, preview)."""
+        panel = self.start_panel
+        native = lambda keys: QKeySequence(keys).toString(QKeySequence.NativeText)
+        self.rows = [
+            ("Save", native(QKeySequence.Save), panel.save_requested.emit),
+            ("Save as…", native(QKeySequence.SaveAs), panel.save_as_requested.emit),
+            ("New board", native(QKeySequence.New), panel.new_board_requested.emit),
+            ("Open board…", native(QKeySequence.Open), panel.open_requested.emit),
+        ]
+        self.first_recent = len(self.rows)
+        for path, _preview in recent[:4]:
+            self.rows.append((Path(path).stem, "", lambda path=path: panel.open_path_requested.emit(path)))
+        height = COMPACT_PADDING * 2 + len(self.rows) * ROW_HEIGHT
+        if len(self.rows) > self.first_recent:
+            height += SECTION_HEIGHT
+        self.setFixedSize(COMPACT_WIDTH, height)
+        self.active = None
+        self.center_in_parent()
+        self.show()
+        self.raise_()
+        self.setFocus()
+
+    def center_in_parent(self):
+        parent = self.parentWidget()
+        self.move(max(0, (parent.width() - self.width()) // 2), max(0, (parent.height() - self.height()) // 2))
+
+    def eventFilter(self, watched, event):
+        if event.type() == QEvent.Resize:
+            self.center_in_parent()
+        return False
+
+    # ---- Layout --------------------------------------------------------------
+
+    def row_rect(self, number):
+        y = COMPACT_PADDING + number * ROW_HEIGHT
+        if number >= self.first_recent:
+            y += SECTION_HEIGHT  # below the "Recent boards" heading
+        return QRectF(COMPACT_PADDING, y, self.width() - COMPACT_PADDING * 2, ROW_HEIGHT)
+
+    def row_at(self, pos):
+        for number in range(len(self.rows)):
+            if self.row_rect(number).contains(pos):
+                return number
+        return None
+
+    # ---- Mouse and keyboard ----------------------------------------------------
+
+    def mouseMoveEvent(self, event):
+        row = self.row_at(event.position())
+        if row != self.active:
+            self.active = row
+            self.setCursor(Qt.PointingHandCursor if row is not None else Qt.ArrowCursor)
+            self.update()
+
+    def leaveEvent(self, event):
+        self.active = None
+        self.update()
+
+    def mousePressEvent(self, event):
+        event.accept()  # never let clicks fall through to the canvas
+        row = self.row_at(event.position())
+        if event.button() == Qt.LeftButton and row is not None:
+            self.rows[row][2]()
+
+    def mouseReleaseEvent(self, event):
+        event.accept()
+
+    def wheelEvent(self, event):
+        event.accept()
+
+    def keyPressEvent(self, event):
+        if event.key() in (Qt.Key_Up, Qt.Key_Down):
+            step = 1 if event.key() == Qt.Key_Down else -1
+            start = -1 if step == 1 else 0
+            self.active = ((self.active if self.active is not None else start) + step) % len(self.rows)
+            self.update()
+            return
+        if event.key() in (Qt.Key_Return, Qt.Key_Enter, Qt.Key_Space) and self.active is not None:
+            self.rows[self.active][2]()
+            return
+        super().keyPressEvent(event)
+
+    # ---- Drawing -------------------------------------------------------------
+
+    def paintEvent(self, event):
+        painter = QPainter(self)
+        painter.setRenderHint(QPainter.Antialiasing)
+        painter.setPen(QPen(BORDER_COLOR, 1))
+        painter.setBrush(PANEL_COLOR)
+        painter.drawPath(squircle_path(QRectF(self.rect()).adjusted(0.5, 0.5, -0.5, -0.5), COMPACT_RADIUS))
+
+        font = QFont(self.font())
+        font.setPointSizeF(10)
+        painter.setFont(font)
+        for number, (text, keys, _action) in enumerate(self.rows):
+            rect = self.row_rect(number)
+            if number == self.first_recent:
+                # The heading above the recent boards, with a line over it.
+                heading = QRectF(rect.left() + 10, rect.top() - SECTION_HEIGHT, rect.width() - 20, SECTION_HEIGHT)
+                painter.setPen(QPen(BORDER_COLOR, 1))
+                painter.drawLine(QPointF(heading.left(), heading.top() + 4.5), QPointF(heading.right(), heading.top() + 4.5))
+                painter.setPen(LABEL_COLOR)
+                painter.drawText(heading.adjusted(0, 6, 0, 0), Qt.AlignLeft | Qt.AlignVCenter, "Recent boards")
+            if number == self.active:
+                painter.setPen(Qt.NoPen)
+                painter.setBrush(ACCENT_COLOR)
+                painter.drawPath(squircle_path(rect, ROW_RADIUS))
+            inner = rect.adjusted(10, 0, -10, 0)
+            painter.setPen(TITLE_COLOR)
+            name = painter.fontMetrics().elidedText(text, Qt.ElideRight, int(inner.width() - 70))
+            painter.drawText(inner, Qt.AlignLeft | Qt.AlignVCenter, name)
+            painter.setPen(TITLE_COLOR if number == self.active else LABEL_COLOR)
+            painter.drawText(inner, Qt.AlignRight | Qt.AlignVCenter, keys)

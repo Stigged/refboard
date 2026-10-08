@@ -22,7 +22,7 @@ from pathlib import Path
 
 from PySide6.QtCore import QLockFile, QStandardPaths
 
-from board_file import FILE_EXTENSION
+from .board_file import FILE_EXTENSION
 
 PREFIX = "backup-"
 LOCK_EXTENSION = ".lock"

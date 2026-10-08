@@ -4,7 +4,7 @@ from PySide6.QtCore import QBuffer, QIODevice, QPointF, QRect, QRectF, Qt
 from PySide6.QtGui import QImage, QPainter, QPen, QPixmap
 from PySide6.QtWidgets import QGraphicsItem, QGraphicsPixmapItem, QStyle
 
-from board_item import HANDLE_FILL, BoardItem, screen_pixel
+from .board_item import HANDLE_FILL, BoardItem, screen_pixel
 
 # Crop mode.
 CROP_GHOST_OPACITY = 0.25  # how visible the cut-off parts are while cropping
